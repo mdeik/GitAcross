@@ -1,0 +1,28 @@
+# Tool runtime
+.gitsync/
+
+# Python
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.kate-swp
+config.yml
+
+todo.md

@@ -1,0 +1,204 @@
+projects:
+
+  # ── Remote → Remote ───────────────────────────────────────────
+  - name: mirror-gitea-to-github
+    # enabled: false             # optional: set to false to disable/skip without deleting (default: true)
+
+    source:
+      type: gitea
+      repo: owner/repo
+      api: https://gitea.example.com/api/v1
+      token: ${GITEA_TOKEN}
+      include_prereleases: false
+      include_drafts: false
+      # sync_from: v2.0.0        # optional: only sync releases from this tag onwards
+      # mode: tag                # optional: treat git tags as releases (default: release)
+
+    target:
+      type: github
+      repo: owner/repo
+      api: https://api.github.com
+      token: ${GITHUB_TOKEN}
+      branch: main
+
+    # preserve_description: true # optional: preserve release notes/description on target release (default: true)
+    # sync_assets: true          # optional: copy all release assets/packages to the target
+    # sync_assets: "*.tar.gz"    # optional: only copy assets matching a glob pattern
+    # sync_assets:               # optional: only copy assets matching any of these patterns
+    #   - "*.tar.gz"
+    #   - "*.zip"
+    #   - "*.deb"
+    # stream_assets: false       # optional: when true, stream asset uploads from disk instead of
+    #                            #           buffering in RAM — recommended for large binary releases
+
+    renderer:
+      ignore:
+        - .git/**
+        - node_modules/**
+        - target/**
+        - dist/**
+        - build/**
+
+      operations:
+        - remove:
+            - path: .gitea
+            - path: "*.secret"
+              pattern: glob
+        - rename:
+            - from: .gitea
+              to: .github
+              pattern: literal
+        - replace:
+            # Stacked searches in one block — items run top-to-bottom
+            - search: https://gitea\.example\.com
+              replace: https://github.com
+              pattern: regex
+              glob: "*.md"
+            - search: gitea.example.com
+              replace: github.com
+              pattern: literal
+              glob: "*.yml"
+        - replace:
+            # Second block runs after the first — files are re-read per item,
+            # so later searches see the output of earlier replacements.
+            # This one only matches once the domain above has been rewritten.
+            - search: github\.com/owner
+              replace: github.com/octocat
+              pattern: regex
+              glob: "*.md"
+        - add:
+            - path: .github/FUNDING.yml
+              content: |
+                github: myuser
+        - validate:
+            - assert: file_exists
+              path: README.md
+            - assert: string_absent
+              path: LICENSE
+              pattern: "Gitea"
+
+    retry:
+      max_attempts: 3
+      backoff_seconds: 2
+
+  # ── Gitea → GitHub with prebuilt binaries ─────────────────────
+  # Build once on Gitea CI, upload prebuilts there, then mirror
+  # the source code AND the prebuilt packages to GitHub — no
+  # GitHub Actions runner needed for the actual build.
+  - name: mirror-with-prebuilts
+
+    sync_assets:               # copy these release packages to GitHub
+      - "*.tar.gz"
+      - "*.zip"
+      - "*.deb"
+      - "*.exe"
+      - "*-checksums.txt"
+
+    source:
+      type: gitea
+      repo: owner/app
+      api: https://gitea.example.com/api/v1
+      token: ${GITEA_TOKEN}
+
+    target:
+      type: github
+      repo: owner/app
+      api: https://api.github.com
+      token: ${GITHUB_TOKEN}
+      branch: main
+
+    renderer:
+      ignore:
+        - .git/**
+      operations:
+        - rename:
+            - from: .gitea
+              to: .github
+
+    retry:
+      max_attempts: 3
+      backoff_seconds: 2
+
+  # ── Local → GitHub ────────────────────────────────────────────
+  - name: publish-local-to-github
+
+    source:
+      type: local
+      path: /path/to/local/repo
+      tag_pattern: "v*"
+
+    target:
+      type: github
+      repo: owner/repo
+      api: https://api.github.com
+      token: ${GITHUB_TOKEN}
+      branch: main
+
+    renderer:
+      # Optional: override commit author name & email
+      author:
+        name: "Jane Doe"
+        email: "jane@example.com"
+      ignore:
+        - .git/**
+        - node_modules/**
+
+    retry:
+      max_attempts: 3
+      backoff_seconds: 2
+
+  # ── GitHub → Local ────────────────────────────────────────────
+  - name: backup-github-to-local
+
+    source:
+      type: github
+      repo: owner/repo
+      api: https://api.github.com
+      token: ${GITHUB_TOKEN}
+      include_prereleases: true
+
+    target:
+      type: local
+      path: /path/to/backup/repo
+      branch: mirror
+
+    renderer:
+      ignore:
+        - .git/**
+
+    retry:
+      max_attempts: 3
+      backoff_seconds: 2
+
+  # ── Gitea → GitHub (commit mode) ──────────────────────────────
+  # Sync the latest HEAD commit of a branch instead of releases.
+  # Useful when the source repo doesn't use releases or tags at all.
+  # No tag or GitHub release is created — only a plain commit is pushed.
+  - name: mirror-branch-head
+
+    source:
+      type: gitea
+      repo: owner/repo
+      api: https://gitea.example.com/api/v1
+      token: ${GITEA_TOKEN}
+      mode: commit
+      branch: main                        # branch to read HEAD from (auto-detected if omitted)
+
+    target:
+      type: github
+      repo: owner/repo
+      api: https://api.github.com
+      token: ${GITHUB_TOKEN}
+      branch: main
+
+    renderer:
+      ignore:
+        - .git/**
+      operations:
+        - rename:
+            - from: .gitea
+              to: .github
+
+    retry:
+      max_attempts: 3
+      backoff_seconds: 2
