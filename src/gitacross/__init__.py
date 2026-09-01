@@ -28,6 +28,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _installed_version
 from pathlib import Path
 
+from .cli import main  # the CLI lives in cli.py; main.py re-exports it too
 from .config import Config, ProjectConfig
 from .linter import (
     ConfigFixer,
@@ -40,7 +41,7 @@ from .linter import (
     fix_config,
     lint_config,
 )
-from .main import main, run, sync_project
+from .main import run, sync_project
 
 
 def _package_version() -> str:
