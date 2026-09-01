@@ -7,6 +7,8 @@ from typing import final
 
 import yaml
 
+from .providers import REMOTE_TYPES
+
 logger = logging.getLogger(__name__)
 
 VALID_PROJECT_KEYS = {
@@ -164,7 +166,12 @@ class _EndpointConfig:
 
     @property
     def is_remote(self):
-        return self.type in ("gitea", "github")
+        return self.type in REMOTE_TYPES
+
+    @property
+    def repo_slug(self):
+        """Filesystem-safe repo identifier (``owner/name`` → ``owner_name``)."""
+        return self.repo.replace("/", "_")
 
     @property
     def owner(self):

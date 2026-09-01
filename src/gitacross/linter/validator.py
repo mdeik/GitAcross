@@ -1,123 +1,22 @@
-"""Config linter for GitAcross.
-
-Validates YAML syntax, detects invalid or misplaced configurations,
-and flags redundant options that match default values.
+"""Config validation — the linter's core check pass.
 """
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .config import KNOWN_ENDPOINT_KEYS, KNOWN_SOURCE_KEYS, VALID_PROJECT_KEYS
-
-
-class LintSeverity(Enum):
-    ERROR = "ERROR"
-    WARNING = "WARNING"
-    REDUNDANT = "REDUNDANT"
-
-
-@dataclass
-class LintIssue:
-    severity: LintSeverity
-    message: str
-    project: str | None = None
-    key: str | None = None
-
-    def __str__(self) -> str:
-        prefix = f"[{self.severity.value}]"
-        if self.project:
-            return f"  {prefix} (project '{self.project}'): {self.message}"
-        return f"  {prefix} {self.message}"
-
-
-@dataclass
-class LintReport:
-    issues: list[LintIssue]
-
-    @property
-    def errors(self) -> list[LintIssue]:
-        return [i for i in self.issues if i.severity == LintSeverity.ERROR]
-
-    @property
-    def warnings(self) -> list[LintIssue]:
-        return [i for i in self.issues if i.severity == LintSeverity.WARNING]
-
-    @property
-    def redundant(self) -> list[LintIssue]:
-        return [i for i in self.issues if i.severity == LintSeverity.REDUNDANT]
-
-    @property
-    def is_valid(self) -> bool:
-        return len(self.errors) == 0
-
-    def __repr__(self):
-        return (
-            f"LintReport(is_valid={self.is_valid}, "
-            f"errors={len(self.errors)}, warnings={len(self.warnings)}, "
-            f"redundant={len(self.redundant)})"
-        )
-
-    def format_text(self) -> str:
-        out = []
-        # Group issues by project (None first)
-        by_proj: dict[str | None, list[LintIssue]] = {}
-        for issue in self.issues:
-            by_proj.setdefault(issue.project, []).append(issue)
-
-        if None in by_proj:
-            for issue in by_proj[None]:
-                out.append(f"[{issue.severity.value}] {issue.message}")
-
-        for proj, issues in by_proj.items():
-            if proj is None:
-                continue
-            out.append(f"\nProject '{proj}':")
-            for issue in issues:
-                out.append(f"  [{issue.severity.value}] {issue.message}")
-
-        summary = f"\nSummary: {len(self.errors)} error(s), {len(self.warnings)} warning(s), {len(self.redundant)} redundant option(s)."
-        out.append(summary)
-        return "\n".join(out)
-
-
-_VALID_SOURCE_KEYS_REMOTE = {
-    "type",
-    "repo",
-    "api",
-    "token",
-    "mode",
-    "branch",
-    "include_prereleases",
-    "include_drafts",
-    "sync_from",
-}
-
-_VALID_SOURCE_KEYS_LOCAL = {
-    "type",
-    "path",
-    "tag_pattern",
-    "sync_from",
-}
-
-_VALID_TARGET_KEYS_REMOTE = {
-    "type",
-    "repo",
-    "api",
-    "token",
-    "branch",
-}
-
-_VALID_TARGET_KEYS_LOCAL = {
-    "type",
-    "path",
-    "branch",
-}
+from ..config import KNOWN_ENDPOINT_KEYS, KNOWN_SOURCE_KEYS, VALID_PROJECT_KEYS
+from ..providers import ENDPOINT_TYPES, REMOTE_TYPES
+from .keys import (
+    _VALID_SOURCE_KEYS_LOCAL,
+    _VALID_SOURCE_KEYS_REMOTE,
+    _VALID_TARGET_KEYS_LOCAL,
+    _VALID_TARGET_KEYS_REMOTE,
+)
+from .models import LintIssue, LintReport, LintSeverity
 
 
 class ConfigLinter:
@@ -142,6 +41,8 @@ class ConfigLinter:
         self, config: str | Path | io.TextIOBase | io.BufferedIOBase
     ) -> LintReport:
         """Lint a config given by path (str/Path) or an open file-like object."""
+        # Fresh accumulator — reusing an instance must not leak prior results
+        self.issues = []
         if isinstance(config, (str, Path)):
             path = Path(config)
             if not path.exists():
@@ -167,6 +68,8 @@ class ConfigLinter:
     def lint_yaml_string(
         self, content: str | bytes, _filename: str | None = None
     ) -> LintReport:
+        # Fresh accumulator — reusing an instance must not leak prior results
+        self.issues = []
         try:
             data = yaml.safe_load(content)
         except yaml.YAMLError as e:
@@ -420,15 +323,16 @@ class ConfigLinter:
 
     def _lint_source(self, s: dict[str, Any], p_name: str):
         src_type = s.get("type", "gitea")
-        if src_type not in ("gitea", "github", "local"):
+        if src_type not in ENDPOINT_TYPES:
             self._add(
                 LintSeverity.ERROR,
-                f"Invalid source type '{src_type}'. Expected 'gitea', 'github', or 'local'.",
+                f"Invalid source type '{src_type}'. "
+                + f"Expected one of {sorted(ENDPOINT_TYPES)}.",
                 project=p_name,
             )
             return
 
-        is_remote = src_type in ("gitea", "github")
+        is_remote = src_type in REMOTE_TYPES
         valid_keys = _VALID_SOURCE_KEYS_REMOTE if is_remote else _VALID_SOURCE_KEYS_LOCAL
         for k in s:
             if k in VALID_PROJECT_KEYS and k != "type":
@@ -532,15 +436,16 @@ class ConfigLinter:
 
     def _lint_target(self, t: dict[str, Any], p_name: str):
         tgt_type = t.get("type", "github")
-        if tgt_type not in ("github", "gitea", "local"):
+        if tgt_type not in ENDPOINT_TYPES:
             self._add(
                 LintSeverity.ERROR,
-                f"Invalid target type '{tgt_type}'. Expected 'github', 'gitea', or 'local'.",
+                f"Invalid target type '{tgt_type}'. "
+                + f"Expected one of {sorted(ENDPOINT_TYPES)}.",
                 project=p_name,
             )
             return
 
-        is_remote = tgt_type in ("github", "gitea")
+        is_remote = tgt_type in REMOTE_TYPES
         valid_keys = _VALID_TARGET_KEYS_REMOTE if is_remote else _VALID_TARGET_KEYS_LOCAL
         for k in t:
             if k in VALID_PROJECT_KEYS and k != "type":
@@ -805,7 +710,7 @@ class ConfigLinter:
                                 project=p_name,
                             )
 
-                elif op_type == "validate":
+                elif op_type == "validate":  # pragma: no branch — reaching here implies validate (dead false-arc)
                     valid_asserts = {
                         "file_exists",
                         "file_absent",
@@ -860,6 +765,7 @@ class ConfigLinter:
                             )
 
 
+
 def lint_config(
     config: str | Path | io.TextIOBase | io.BufferedIOBase,
     print_output: bool = True,
@@ -872,330 +778,4 @@ def lint_config(
     return report
 
 
-# ---------------------------------------------------------------------------
-# Config Fixer
-# ---------------------------------------------------------------------------
-
-
-class _CleanDumper(yaml.SafeDumper):
-    pass
-
-
-def _str_presenter(dumper, data):
-    if "\n" in data:
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
-
-
-_CleanDumper.add_representer(str, _str_presenter)
-
-
-@dataclass
-class FixIssue:
-    message: str
-    project: str | None = None
-
-    def __str__(self) -> str:
-        if self.project:
-            return f"  ✓ (project '{self.project}'): {self.message}"
-        return f"  ✓ {self.message}"
-
-
-@dataclass
-class FixReport:
-    fixes: list[FixIssue]
-    content: str
-    is_valid: bool
-    error: str | None = None
-
-    def format_text(self) -> str:
-        if not self.is_valid:
-            return f"[ERROR] Could not fix configuration: {self.error}"
-        if not self.fixes:
-            return "No fixes needed. Config is already clean and optimal."
-        out = [f"Applied {len(self.fixes)} fix(es):"]
-        by_proj: dict[str | None, list[FixIssue]] = {}
-        for fix in self.fixes:
-            by_proj.setdefault(fix.project, []).append(fix)
-
-        if None in by_proj:
-            for fix in by_proj[None]:
-                out.append(f"  ✓ {fix.message}")
-
-        for proj, fixes in by_proj.items():
-            if proj is None:
-                continue
-            out.append(f"\nProject '{proj}':")
-            for fix in fixes:
-                out.append(f"  ✓ {fix.message}")
-
-        return "\n".join(out)
-
-    def __repr__(self) -> str:
-        return (
-            f"FixReport(is_valid={self.is_valid}, fixes={len(self.fixes)}, "
-            f"error={self.error!r})"
-        )
-
-
-class ConfigFixer:
-    def __init__(self):
-        self.fixes: list[FixIssue] = []
-
-    def __repr__(self):
-        return f"ConfigFixer(fixes={len(self.fixes)})"
-
-    def _add(self, message: str, project: str | None = None):
-        self.fixes.append(FixIssue(message=message, project=project))
-
-    def fix_yaml_string(self, content: str) -> FixReport:
-        try:
-            data = yaml.safe_load(content)
-        except yaml.YAMLError as e:
-            return FixReport(fixes=[], content=content, is_valid=False, error=str(e))
-
-        if data is None:
-            return FixReport(fixes=[], content=content, is_valid=True)
-
-        is_dict_wrapper = isinstance(data, dict) and "projects" in data
-        projects_list = data["projects"] if is_dict_wrapper else data
-
-        if not isinstance(projects_list, list):
-            return FixReport(
-                fixes=[],
-                content=content,
-                is_valid=False,
-                error="Top-level YAML structure must be a list of projects or a map with a 'projects' list.",
-            )
-
-        for _idx, p in enumerate(projects_list):
-            if isinstance(p, dict):
-                self._fix_project(p)
-
-        fixed_yaml = yaml.dump(
-            data,
-            Dumper=_CleanDumper,
-            sort_keys=False,
-            default_flow_style=False,
-        )
-        return FixReport(fixes=self.fixes, content=fixed_yaml, is_valid=True)
-
-    def _fix_project(self, p: dict[str, Any]):
-        p_name = p.get("name") or "<unnamed>"
-
-        # 1. Misplaced endpoint keys at project level -> move to source
-        for k in list(p.keys()):
-            if k in KNOWN_SOURCE_KEYS:
-                val = p.pop(k)
-                if "source" not in p or not isinstance(p["source"], dict):
-                    p["source"] = {}
-                if k not in p["source"]:
-                    p["source"][k] = val
-                    self._add(
-                        f"Moved '{k}: {val}' from project level into 'source:'",
-                        project=p_name,
-                    )
-                else:
-                    self._add(
-                        f"Removed duplicate project-level '{k}' (already present under source)",
-                        project=p_name,
-                    )
-
-        # 2. Misplaced project-level keys inside source -> move to project level
-        if isinstance(p.get("source"), dict):
-            for k in list(p["source"].keys()):
-                if k in VALID_PROJECT_KEYS and k != "type":
-                    val = p["source"].pop(k)
-                    if k not in p:
-                        p[k] = val
-                        self._add(
-                            f"Moved '{k}' from 'source:' to project level",
-                            project=p_name,
-                        )
-                    else:
-                        self._add(
-                            f"Removed duplicate '{k}' from 'source:' (already present at project level)",
-                            project=p_name,
-                        )
-
-        # 3. Misplaced project keys in target -> move to project level
-        #    and misplaced source keys in target -> move to source
-        if isinstance(p.get("target"), dict):
-            for k in list(p["target"].keys()):
-                if k in VALID_PROJECT_KEYS and k != "type":
-                    val = p["target"].pop(k)
-                    if k not in p:
-                        p[k] = val
-                        self._add(
-                            f"Moved '{k}' from 'target:' to project level",
-                            project=p_name,
-                        )
-                    else:
-                        self._add(
-                            f"Removed duplicate '{k}' from 'target:' (already present at project level)",
-                            project=p_name,
-                        )
-                elif k in KNOWN_SOURCE_KEYS:
-                    val = p["target"].pop(k)
-                    if "source" not in p or not isinstance(p["source"], dict):
-                        p["source"] = {}
-                    if k not in p["source"]:
-                        p["source"][k] = val
-                        self._add(
-                            f"Moved '{k}: {val}' from 'target:' into 'source:'",
-                            project=p_name,
-                        )
-                    else:
-                        self._add(
-                            f"Removed duplicate '{k}' from 'target:' (already present under source)",
-                            project=p_name,
-                        )
-
-        # 4. Redundant project-level options
-        if p.get("enabled") is True:
-            del p["enabled"]
-            self._add("Removed redundant 'enabled: true'", project=p_name)
-
-        for key in ("preserve_description",):
-            if p.get(key) is True:
-                del p[key]
-                self._add(f"Removed redundant '{key}: true'", project=p_name)
-
-        for key in ("sync_assets",):
-            if p.get(key) is False:
-                del p[key]
-                self._add(f"Removed redundant '{key}: false'", project=p_name)
-
-        if p.get("stream_assets") is False:
-            del p["stream_assets"]
-            self._add("Removed redundant 'stream_assets: false'", project=p_name)
-
-        # 3. Source endpoint fixes
-        if isinstance(p.get("source"), dict):
-            src = p["source"]
-            if src.get("mode") == "release":
-                del src["mode"]
-                self._add(
-                    "Removed redundant 'source.mode: release'", project=p_name
-                )
-            if src.get("include_prereleases") is False:
-                del src["include_prereleases"]
-                self._add(
-                    "Removed redundant 'source.include_prereleases: false'",
-                    project=p_name,
-                )
-            if src.get("include_drafts") is False:
-                del src["include_drafts"]
-                self._add(
-                    "Removed redundant 'source.include_drafts: false'",
-                    project=p_name,
-                )
-            if src.get("sync_from") == "":
-                del src["sync_from"]
-                self._add(
-                    "Removed redundant 'source.sync_from: \"\"'",
-                    project=p_name,
-                )
-            if src.get("tag_pattern") == "*":
-                del src["tag_pattern"]
-                self._add(
-                    "Removed redundant 'source.tag_pattern: \"*\"'",
-                    project=p_name,
-                )
-
-        # 4. Target endpoint fixes
-        if isinstance(p.get("target"), dict):
-            tgt = p["target"]
-            if tgt.get("branch") == "main":
-                del tgt["branch"]
-                self._add(
-                    "Removed redundant 'target.branch: main'", project=p_name
-                )
-
-        # 5. Retry fixes
-        if isinstance(p.get("retry"), dict):
-            ret = p["retry"]
-            if ret.get("max_attempts") == 3:
-                del ret["max_attempts"]
-            if ret.get("backoff_seconds") == 2:
-                del ret["backoff_seconds"]
-            if len(ret) == 0:
-                del p["retry"]
-                self._add(
-                    "Removed default 'retry' configuration block",
-                    project=p_name,
-                )
-            else:
-                self._add(
-                    "Removed redundant retry defaults", project=p_name
-                )
-
-        # 6. Renderer fixes
-        if isinstance(p.get("renderer"), dict):
-            ren = p["renderer"]
-            if isinstance(ren.get("operations"), list):
-                for op in ren["operations"]:
-                    if not isinstance(op, dict):
-                        continue
-                    for op_type, items in op.items():
-                        if isinstance(items, list):
-                            for item in items:
-                                if not isinstance(item, dict):
-                                    continue
-                                if item.get("pattern") == "literal":
-                                    del item["pattern"]
-                                    self._add(
-                                        f"Removed redundant 'pattern: literal' in {op_type} operation",
-                                        project=p_name,
-                                    )
-                                if op_type == "replace":
-                                    if item.get("case_sensitive") is True:
-                                        del item["case_sensitive"]
-                                        self._add(
-                                            "Removed redundant 'case_sensitive: true' in replace operation",
-                                            project=p_name,
-                                        )
-                                    if item.get("match_case") is False:
-                                        del item["match_case"]
-                                        self._add(
-                                            "Removed redundant 'match_case: false' in replace operation",
-                                            project=p_name,
-                                        )
-                                if op_type == "validate" and item.get(
-                                    "case_sensitive"
-                                ) is True:
-                                    del item["case_sensitive"]
-                                    self._add(
-                                        "Removed redundant 'case_sensitive: true' in validate operation",
-                                        project=p_name,
-                                    )
-
-
-def fix_config(
-    config: str | Path,
-    write_back: bool = True,
-    print_output: bool = True,
-) -> FixReport:
-    """Fix misplaced and redundant options in config file.
-
-    Path-only: unlike :func:`lint_config`, this writes the fixed YAML back to
-    the file (when *write_back* is true), so it requires a real file path.
-    """
-    path = Path(config)
-    if not path.exists():
-        report = FixReport(
-            fixes=[], content="", is_valid=False, error=f"File not found: {path}"
-        )
-        if print_output:
-            print(report.format_text())
-        return report
-
-    content = path.read_text(encoding="utf-8")
-    fixer = ConfigFixer()
-    report = fixer.fix_yaml_string(content)
-    if report.is_valid and write_back and report.fixes:
-        _ = path.write_text(report.content, encoding="utf-8")
-    if print_output:
-        print(report.format_text())
-    return report
 

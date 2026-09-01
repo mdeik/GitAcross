@@ -7,6 +7,11 @@ __pycache__/
 .ruff_cache/
 *.pyc
 *.pyo
+*.cover
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 *.egg-info/
 dist/
 build/

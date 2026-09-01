@@ -4,12 +4,11 @@ Supported types: gitea, github, local.
 """
 from __future__ import annotations
 
-
 import logging
 from pathlib import Path
 
 from .git import GitRepo
-from .providers import get_api_client
+from .providers import ENDPOINT_TYPES, REMOTE_TYPES, get_api_client
 from .retry import retry
 
 logger = logging.getLogger(__name__)
@@ -20,9 +19,11 @@ def create_target(config, cache_dir, retry_max=3, retry_backoff=2, author=None):
     t = config.type
     if t == "local":
         return _LocalTarget(config, author=author)
-    if t in ("gitea", "github"):
+    if t in REMOTE_TYPES:
         return _RemoteTarget(config, cache_dir, retry_max, retry_backoff, author=author)
-    raise ValueError(f"Unknown target type: {t}")
+    raise ValueError(
+        f"Unknown target type: {t} — expected one of {sorted(ENDPOINT_TYPES)}"
+    )
 
 
 def _resolve_author(author):
@@ -55,10 +56,9 @@ class _RemoteTarget:
                 f"Could not determine clone URL for '{config.repo}'. "
                 "set clone_url in the target config or ensure the API returns it."
             )
-        repo_slug = config.repo.replace("/", "_")
         self._git = GitRepo.ensure_mirror(
             clone_url,
-            Path(cache_dir) / f"target_{config.type}_{repo_slug}.git",
+            Path(cache_dir) / f"target_{config.type}_{config.repo_slug}.git",
         )
         self._retry_max = retry_max
         self._retry_backoff = retry_backoff
