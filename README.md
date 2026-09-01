@@ -134,7 +134,7 @@ Set to `false` to pause a project without removing it from the config. Default `
 
 #### `preserve_description`
 
-Copy the source release notes/body to the target release. Default `true` (alias: `preserve_release_description`). Set at the project or endpoint level; `false` leaves the target release description empty.
+Copy the source release notes/body to the target release. Default `true`. Set at the project or endpoint level; `false` leaves the target release description empty.
 
 #### `release_description`
 
@@ -146,7 +146,7 @@ Custom commit message for the target commits (alias: `commit_template`). Default
 
 #### `sync_assets`
 
-Mirror prebuilt release packages from the source to the target release — so you only need CI on the source platform (aliases: `preserve_assets`, `include_assets`). Project-level field:
+Mirror prebuilt release packages from the source to the target release — so you only need CI on the source platform. Project-level field:
 
 | Value | Behaviour |
 |---|---|
@@ -461,7 +461,7 @@ results = gitacross.run("config.yml", reset=True)
 <summary>Full control — loop over projects yourself</summary>
 
 ```python
-config = gitacross.Config.from_path("config.yml")
+config = gitacross.Config("config.yml")
 
 for project in config.projects:
     if project.enabled:
@@ -507,12 +507,44 @@ if not report.is_valid:
 
 </details>
 
+<details>
+<summary>Sync from YAML held in a variable — no file needed</summary>
+
+```python
+# ${VAR} tokens still resolve from the environment
+config = gitacross.Config.from_yaml_string("""
+projects:
+  - name: my-mirror
+    source:
+      type: gitea
+      repo: owner/repo
+      api: https://gitea.example.com/api/v1
+      token: ${GITEA_TOKEN}
+    target:
+      type: github
+      repo: owner/repo
+      api: https://api.github.com
+      token: ${GITHUB_TOKEN}
+""")
+gitacross.run(config, dry_run=True)
+```
+
+</details>
+
+All public symbols are importable directly from `gitacross`:
+
 | Symbol | What it does |
 |---|---|
-| `run(config_path, project=None, dry_run=False, reset=False, work_dir=".gitsync")` | Sync from a config file — the primary entry point. Returns one dict per project: `project`, `synced`, `releases_synced`, `releases`, `error` |
+| `run(config, project=None, dry_run=False, reset=False, work_dir=".gitsync")` | **Primary entry point.** Sync from a config — a `Config` instance, a path, or an open file object
 | `sync_project(project, work_dir=".gitsync", dry_run=False)` | Sync one project's new releases (respects `project.enabled`); state and cache live in `work_dir`. Returns dicts with `tag`, `source_commit`, `target_commit`, `source_date` |
-| `lint_config(config_path, print_output=True)` | Lint a config file → `LintReport` (`.is_valid`, `.errors`) |
-| `fix_config(config_path, write_back=True, print_output=True)` | Fix misplaced/redundant options → `FixReport` |
-| `Config(config_path)` / `Config.from_path(config_path)` | Load a config file; exposes `.projects` |
-| `ProjectConfig` | One mirror: `name`, `enabled`, `source`, `target`, `renderer`, `retry`, `sync_assets`, `stream_assets`, `preserve_description`, `commit_message`, `release_description` |
-| `ConfigLinter`, `ConfigFixer`, `LintIssue`, `FixIssue`, `LintReport`, `FixReport`, `LintSeverity` | Building blocks for programmatic linting and fixing |
+| `lint_config(config, print_output=True)` | Lint a config (path or open file object) → `LintReport` |
+| `fix_config(config, write_back=True, print_output=True)` | Fix misplaced/redundant options (path only — writes back to the file) → `FixReport` |
+| `Config(config_source)` | Load a config from a path or open file object; exposes `.projects`. `Config.from_yaml_string(content)` loads a config from raw YAML text (`str` or `bytes`) — no file or stream needed |
+| `ProjectConfig(raw)` | Build one mirror project from a raw config dict (see the “No config file” example). Fields: `name`, `enabled`, `source`, `target`, `renderer`, `retry`, `preserve_description`, `sync_assets`, `stream_assets`, `commit_message`, `release_description` |
+| `ConfigLinter()` | Collect lint issues programmatically: `lint_file(config)`, `lint_yaml_string(content)`; results accumulate in `.issues` |
+| `ConfigFixer()` | Fix a config programmatically: `fix_yaml_string(content)` → `FixReport`; actions recorded in `.fixes` |
+| `LintIssue(severity, message, project=None, key=None)` | One lint finding |
+| `FixIssue(message, project=None)` | One applied fix |
+| `LintReport(issues)` | Lint results: `.issues`, `.errors`, `.warnings`, `.redundant`, `.is_valid`, `.format_text()` |
+| `FixReport(fixes, content, is_valid, error=None)` | Fix results: `.fixes`, `.content`, `.is_valid`, `.error`, `.format_text()` |
+| `LintSeverity` | Severity levels used by `LintIssue`: `LintSeverity.ERROR`, `LintSeverity.WARNING`, `LintSeverity.REDUNDANT` |

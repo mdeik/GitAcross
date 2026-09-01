@@ -11,11 +11,13 @@ Provider subclasses only need to override:
 
 Adding a brand-new provider therefore requires writing only those six items.
 """
+from __future__ import annotations
 
 import json
 import logging
 import urllib.error
 import urllib.request
+from typing import ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +26,15 @@ class BaseAPIClient:
     """Shared REST API behaviour for all remote provider clients."""
 
     _platform_name: str = "Remote"
-    _conflict_codes: tuple = (409, 422)
+    _conflict_codes: tuple[int, ...] = (409, 422)
     _release_conflict_code: int = 422
+    # Subclasses override this in their own __init__ (see class docstring).
+    _headers: ClassVar[dict[str, str]] = {}
 
     def __init__(self, api: str, repo: str, token: str):
-        self.api = api.rstrip("/")
-        self.repo = repo
-        self.token = token
+        self.api: str = api.rstrip("/")
+        self.repo: str = repo
+        self.token: str = token
         # Subclasses must set self._headers in their own __init__.
 
     # ------------------------------------------------------------------
@@ -101,11 +105,8 @@ class BaseAPIClient:
             }.get(e.code, f"unexpected HTTP {e.code}")
             raise RuntimeError(
                 f"{self._platform_name} repo '{self.repo}' is not accessible "
-                f"(HTTP {e.code}): {hint}."
+                + f"(HTTP {e.code}): {hint}."
             ) from e
-
-    # Keep the old name as an alias for backwards compatibility.
-    verify_access = ensure_repo_exists
 
     def _create_repo(self):
         """Create the repository as private and return its metadata.
@@ -121,10 +122,10 @@ class BaseAPIClient:
         }
         # Determine whether the owner is the authenticated user or an org.
         try:
-            user_info = self._request_url("GET", f"{self.api}/user")
+            user_info = self._request_url("GET", f"{self.api}/user") or {}
             is_user = user_info.get("login", "").lower() == owner.lower()
-        except Exception:
-            is_user = True  # fall back to user endpoint on any error
+        except (urllib.error.HTTPError, OSError):
+            is_user = True  # fall back to user endpoint on transient errors
 
         url = (
             f"{self.api}/user/repos"
@@ -152,9 +153,9 @@ class BaseAPIClient:
             if e.code in self._conflict_codes:
                 raise RuntimeError(
                     f"{self._platform_name} repo '{self.repo}' could not be created "
-                    f"(HTTP {e.code}): the repository may already exist as a private "
-                    "repo that this token cannot access. Ensure the token has "
-                    "read/write access to the repo."
+                    + f"(HTTP {e.code}): the repository may already exist as a private "
+                    + "repo that this token cannot access. Ensure the token has "
+                    + "read/write access to the repo."
                 ) from e
             logger.error(
                 "Failed to create %s repo: %s %s",
@@ -162,7 +163,7 @@ class BaseAPIClient:
             )
             raise RuntimeError(
                 f"Could not create {self._platform_name} repo '{self.repo}' "
-                f"(HTTP {e.code}): {body_text}"
+                + f"(HTTP {e.code}): {body_text}"
             ) from e
 
     # ------------------------------------------------------------------
@@ -170,7 +171,7 @@ class BaseAPIClient:
     # ------------------------------------------------------------------
 
     def list_releases(self, page=1, limit=50):
-        """List releases (paginated). Override in subclasses if the query-param name differs."""
+        """list releases (paginated). Override in subclasses if the query-param name differs."""
         return self._request("GET", f"releases?page={page}&limit={limit}")
 
     def get_release_by_tag(self, tag):
@@ -183,7 +184,7 @@ class BaseAPIClient:
             raise
 
     def list_release_assets(self, release_id):
-        """List assets for a release ID. Returns [] if not found (404)."""
+        """list assets for a release ID. Returns [] if not found (404)."""
         try:
             return self._request("GET", f"releases/{release_id}/assets") or []
         except urllib.error.HTTPError as e:
@@ -217,11 +218,11 @@ class BaseAPIClient:
     # Asset management — implemented by each provider
     # ------------------------------------------------------------------
 
-    def download_asset(self, asset, dest):
+    def download_asset(self, _asset, _dest):
         """Download a release asset to *dest* path. Must be overridden."""
         raise NotImplementedError
 
-    def upload_asset(self, release_or_id, file_path, name=None, stream=False):
+    def upload_asset(self, _release_or_id, _file_path, _name=None, _stream=False):
         """Upload an asset to a release. Must be overridden.
 
         When *stream* is ``True`` the file should be streamed from disk rather

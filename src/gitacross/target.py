@@ -2,6 +2,8 @@
 
 Supported types: gitea, github, local.
 """
+from __future__ import annotations
+
 
 import logging
 from pathlib import Path
@@ -51,7 +53,7 @@ class _RemoteTarget:
         if not clone_url:
             raise RuntimeError(
                 f"Could not determine clone URL for '{config.repo}'. "
-                "Set clone_url in the target config or ensure the API returns it."
+                "set clone_url in the target config or ensure the API returns it."
             )
         repo_slug = config.repo.replace("/", "_")
         self._git = GitRepo.ensure_mirror(

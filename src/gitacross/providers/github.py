@@ -1,4 +1,6 @@
 """GitHub provider — REST API client for github.com and GitHub Enterprise."""
+from __future__ import annotations
+
 
 import json
 import logging

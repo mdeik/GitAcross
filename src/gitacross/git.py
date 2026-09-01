@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import logging
 import os
@@ -5,6 +7,7 @@ import re
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import final
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,7 @@ def _git(*args, check=True, input_data=None, text=True, env=None):
     return result
 
 
+@final
 class GitRepo:
     """A git repository for release operations.
 
@@ -85,17 +89,17 @@ class GitRepo:
             # Update remote URL *before* fetching so token rotation takes effect
             current = _git("-C", str(path), "remote", "get-url", "origin", check=False)
             if current.returncode == 0 and current.stdout.strip() != url:
-                _git("-C", str(path), "remote", "set-url", "origin", url)
+                _ = _git("-C", str(path), "remote", "set-url", "origin", url)
                 logger.info("Updated remote URL for mirror at %s", dest)
-            _git("-C", str(path), "fetch", "--tags", "--prune", "origin")
+            _ = _git("-C", str(path), "fetch", "--tags", "--prune", "origin")
             logger.info("Updated mirror at %s", dest)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            _git("clone", "--mirror", url, str(path))
+            _ = _git("clone", "--mirror", url, str(path))
             logger.info("Cloned mirror from %s", _redact(url))
         # Ensure author identity for automated commits
-        _git("-C", str(path), "config", "user.name", "GitAcross")
-        _git("-C", str(path), "config", "user.email", "sync@gitacross")
+        _ = _git("-C", str(path), "config", "user.name", "GitAcross")
+        _ = _git("-C", str(path), "config", "user.email", "sync@gitacross")
         return cls(path, is_bare=True)
 
     @classmethod
@@ -163,6 +167,11 @@ class GitRepo:
 
     def export_commit(self, commit_sha, dest):
         """Export a commit's file tree into *dest* (empty dir recommended)."""
+        # git archive of an empty tree emits a dangling pax_global_header that
+        # tarfile can't read, so skip archiving when the tree has no files.
+        tree = self._g("ls-tree", "-r", "--name-only", commit_sha, check=False)
+        if tree.returncode != 0 or not tree.stdout.strip():
+            return
         result = self._g("archive", commit_sha, "--format=tar", text=False)
         with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r|") as tar:
             tar.extractall(path=str(dest))
@@ -180,7 +189,7 @@ class GitRepo:
         # Already exists locally
         local = self._g("show-ref", "--verify", f"refs/heads/{branch}", check=False)
         if local.returncode == 0:
-            self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+            _ = self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
             return
 
         # Exists on remote
@@ -188,12 +197,12 @@ class GitRepo:
             "show-ref", "--verify", f"refs/remotes/origin/{branch}", check=False
         )
         if remote.returncode == 0:
-            self._g("branch", "--force", branch, f"origin/{branch}")
-            self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+            _ = self._g("branch", "--force", branch, f"origin/{branch}")
+            _ = self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
             return
 
         # Brand new branch — just set HEAD, the ref is created on first commit
-        self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        _ = self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
 
     def commit(self, work_dir, message, date=None, author_name=None, author_email=None):
         """Stage all files in *work_dir* and commit on current branch.
@@ -204,7 +213,7 @@ class GitRepo:
         If *author_name* and/or *author_email* are provided, they override the
         git identity for this commit (both author and committer).
         """
-        self._gw(work_dir, "add", "-A")
+        _ = self._gw(work_dir, "add", "-A")
         env = dict(os.environ)
         if date:
             env.update({
@@ -239,25 +248,25 @@ class GitRepo:
 
     def tag(self, name, message):
         """Create (or force-update) an annotated tag."""
-        self._g("tag", "-f", name, "-m", message)
+        _ = self._g("tag", "-f", name, "-m", message)
 
     def reset_worktree(self):
         """Populate the working tree to match HEAD. No-op for bare repos."""
         if not self.is_bare:
-            _git("-C", str(self.git_dir.parent), "reset", "--hard", "HEAD")
+            _ = _git("-C", str(self.git_dir.parent), "reset", "--hard", "HEAD")
 
     def push(self, remote, *refs):
         """Push specific refs to remote."""
         # Mirrors (cloned with --mirror) reject explicit refspecs by default.
         # Temporarily disable mirror mode so we can push only the refs we need.
         if self.is_bare:
-            self._g("config", "--local", "remote.origin.mirror", "false")
+            _ = self._g("config", "--local", "remote.origin.mirror", "false")
             try:
-                self._g("push", remote, *refs)
+                _ = self._g("push", remote, *refs)
             finally:
-                self._g("config", "--local", "remote.origin.mirror", "true")
+                _ = self._g("config", "--local", "remote.origin.mirror", "true")
         else:
-            self._g("push", remote, *refs)
+            _ = self._g("push", remote, *refs)
 
     def tag_exists(self, tag):
         """Check if a tag exists locally."""

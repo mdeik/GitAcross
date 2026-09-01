@@ -2,10 +2,12 @@
 
 Supported types: gitea, github, local.
 """
+from __future__ import annotations
 
 import fnmatch
 import logging
 from pathlib import Path
+from typing import final
 
 from .git import GitRepo
 from .providers import get_api_client
@@ -49,6 +51,7 @@ def _filter_from_sync_point(releases, sync_from):
 # ---------------------------------------------------------------------------
 
 
+@final
 class _RemoteSource:
     """Source backed by a remote API (Gitea/GitHub) + a bare git mirror."""
 
@@ -56,7 +59,7 @@ class _RemoteSource:
         self._repo = config.repo
         self._type = config.type
         self._api = get_api_client(config.type, config.api, config.repo, config.token)
-        self._api.verify_access()
+        self._api.ensure_repo_exists()
         repo_slug = config.repo.replace("/", "_")
         self._git = GitRepo.ensure_mirror(
             config.clone_url,
@@ -104,7 +107,7 @@ class _RemoteSource:
             if not tags:
                 logger.warning(
                     "No API releases or git tags found for %s repo '%s'. "
-                    "If this repository does not use releases/tags, set 'mode: commit' under 'source:' in your config.",
+                    + "If this repository does not use releases/tags, set 'mode: commit' under 'source:' in your config.",
                     self._type,
                     self._repo,
                 )
@@ -138,13 +141,13 @@ class _RemoteSource:
             if any(r["tag_name"] == self._sync_from for r in releases):
                 logger.warning(
                     "sync_from tag '%s' is a release but was filtered out (prerelease/draft). "
-                    + "Set include_prereleases/include_drafts to include it; syncing nothing for now.",
+                    + "set include_prereleases/include_drafts to include it; syncing nothing for now.",
                     self._sync_from,
                 )
             elif self._git.tag_exists(self._sync_from):
                 logger.warning(
                     "sync_from tag '%s' has no API release (git tag only). "
-                    + "Set source mode: tag to sync from git tags; syncing nothing for now.",
+                    + "set source mode: tag to sync from git tags; syncing nothing for now.",
                     self._sync_from,
                 )
             else:
@@ -163,7 +166,7 @@ class _RemoteSource:
         if not sorted_tags and self._mode == "tag":
             logger.warning(
                 "No git tags found for %s repo '%s'. "
-                "If this repository does not use tags, set 'mode: commit' under 'source:' in your config.",
+                + "If this repository does not use tags, set 'mode: commit' under 'source:' in your config.",
                 self._type,
                 self._repo,
             )
@@ -195,8 +198,8 @@ class _RemoteSource:
         if self._sync_from:
             logger.warning(
                 "sync_from is set but has no effect in commit mode — "
-                "state already prevents re-syncing the same SHA. "
-                "Remove sync_from from your config to suppress this warning."
+                + "state already prevents re-syncing the same SHA. "
+                + "Remove sync_from from your config to suppress this warning."
             )
 
         branch = self._branch or None  # pass None to trigger auto-detect
@@ -245,6 +248,7 @@ class _RemoteSource:
         return self._git.git_dir
 
 
+@final
 class _LocalSource:
     """Source backed by a local git repository — tags are 'releases'."""
 
@@ -286,10 +290,10 @@ class _LocalSource:
         ref = rel.get("commit_sha") or rel.get("tag_name", "")
         self._git.export_commit(ref, dest)
 
-    def download_asset(self, asset, dest):
+    def download_asset(self, _asset, _dest):
         pass
 
-    def list_release_assets(self, release_id):
+    def list_release_assets(self, _release_id):
         return []
 
     @property
