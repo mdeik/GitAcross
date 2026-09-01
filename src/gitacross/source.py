@@ -2,152 +2,45 @@
 
 Supported types: gitea, github, local.
 """
-from __future__ import annotations
 
 import fnmatch
 import logging
-import re
 from pathlib import Path
-from typing import final
 
 from .git import GitRepo
-from .providers import ENDPOINT_TYPES, REMOTE_TYPES, get_api_client
+from .providers import get_api_client
 
 logger = logging.getLogger(__name__)
 
 
-def create_source(config, cache_dir, dry_run=False):
+def create_source(config, cache_dir):
     """Factory: build a Source endpoint from the config."""
     t = config.type
     if t == "local":
         return _LocalSource(config)
-    if t in REMOTE_TYPES:
+    if t in ("gitea", "github"):
         if config.mode not in ("release", "tag", "commit"):
             raise ValueError(
                 f"Unknown source mode '{config.mode}' — expected 'release', 'tag', or 'commit'"
             )
-        return _RemoteSource(config, cache_dir, dry_run=dry_run)
-    raise ValueError(
-        f"Unknown source type: {t} — expected one of {sorted(ENDPOINT_TYPES)}"
-    )
-
-
-# Calendar versions start with a 4-digit year (YYYY[.MM[.DD[...]]], e.g.
-# 2024.05.01 or 2024-05-01). Every dot/dash/underscore-separated numeric
-# field is part of the date sequence.
-_CALENDAR_RE = re.compile(r"[^0-9]*(\d{4}(?:[._-]\d{1,4})*)")
-# SemVer-style cores are dot-separated numbers; a hyphen introduces a
-# prerelease, never another core field.
-_SEMVER_CORE_RE = re.compile(r"(\d+(?:\.\d+)*)")
-
-
-def _version_key(tag):
-    """Parse a version-like tag into a comparable ``(fields, prerelease)`` key.
-
-    Two schemes are supported, parsed separately because they are semantically
-    different:
-
-    * **SemVer** — ``v1.2.3``, ``v1.2.3-rc.1``. Dot-separated core; a hyphen
-      starts a prerelease that sorts before the final release.
-    * **Calendar (CalVer)** — ``2024.05.01``, ``2024-05-01``, ``2024.05``.
-      Date-based: a leading 4-digit year marks it, and every numeric field
-      (dot *or* dash separated) belongs to the (year, month, day, ...)
-      sequence, compared as plain numbers. No major/minor/patch or SemVer
-      prerelease semantics apply to the date fields themselves.
-
-    Returns ``None`` when the tag carries no parseable version.
-    """
-    if not isinstance(tag, str):
-        return None
-    calendar = _CALENDAR_RE.match(tag)
-    if calendar:
-        fields = tuple(int(part) for part in re.split(r"[._-]", calendar.group(1)))
-        rest = tag[calendar.end():].split("+", 1)[0]
-    else:
-        match = _SEMVER_CORE_RE.search(tag)
-        if not match:
-            return None
-        fields = tuple(int(part) for part in match.group(1).split("."))
-        rest = tag[match.end():].split("+", 1)[0]
-    # Anything remaining after the version fields is a prerelease; build
-    # metadata ("+...") is ignored for ordering, per SemVer.
-    ids = tuple(re.findall(r"[0-9A-Za-z]+", rest))
-    return fields, (ids or None)
-
-
-def _cmp_version_key(a, b):
-    """Compare two ``_version_key`` results: -1/0/1 (SemVer-ish ordering)."""
-    (ca, pa), (cb, pb) = a, b
-    width = max(len(ca), len(cb))
-    ca += (0,) * (width - len(ca))
-    cb += (0,) * (width - len(cb))
-    if ca != cb:
-        return 1 if ca > cb else -1
-    # Same core: a final release outranks any prerelease of it
-    if pa is None and pb is None:
-        return 0
-    if pa is None:
-        return 1
-    if pb is None:
-        return -1
-    # Compare prerelease identifiers: numeric < alphanumeric, identifiers
-    # compare numerically when both numeric, lexically when both alphanumeric
-    for x, y in zip(pa, pb):
-        xn, yn = x.isdigit(), y.isdigit()
-        if xn and yn:
-            xi, yi = int(x), int(y)
-            if xi != yi:
-                return 1 if xi > yi else -1
-        elif xn != yn:
-            return -1 if xn else 1
-        elif x != y:
-            return 1 if x > y else -1
-    return 1 if len(pa) > len(pb) else (-1 if len(pa) < len(pb) else 0)
-
-
-def _newer_than_version(tag, cutoff):
-    """True when *tag* parses as a version strictly newer than *cutoff*."""
-    key = _version_key(tag)
-    return key is not None and _cmp_version_key(key, cutoff) > 0
+        return _RemoteSource(config, cache_dir)
+    raise ValueError(f"Unknown source type: {t}")
 
 
 def _filter_from_sync_point(releases, sync_from):
-    """Filter to releases at or after the sync_from tag.
+    """Filter to releases at or after the sync_from tag (inclusive).
 
-    Releases must already be sorted oldest-first. If sync_from is empty return
-    all releases. When the exact tag is present, everything from it onwards is
-    included; when it is missing (renamed, deleted, or never released), releases
-    whose version is strictly newer than sync_from are synced instead. Tags that
-    cannot be compared (no version digits) are skipped rather than silently
-    backfilling history.
+    Releases must already be sorted oldest-first. If sync_from is empty
+    return all releases. If the tag isn't found, return nothing —
+    better to skip than silently backfill history.
     """
     if not sync_from:
         return releases
     for i, rel in enumerate(releases):
         if rel["tag_name"] == sync_from:
             return releases[i:]
-
-    # Exact tag not found — fall back to releases with a newer version.
-    cutoff = _version_key(sync_from)
-    if cutoff is None:
-        logger.warning(
-            "sync_from '%s' not found and is not version-like — syncing nothing",
-            sync_from,
-        )
-        return []
-    newer = [r for r in releases if _newer_than_version(r.get("tag_name"), cutoff)]
-    if not newer:
-        logger.warning(
-            "sync_from tag '%s' not found and no releases are newer — syncing nothing",
-            sync_from,
-        )
-    else:
-        logger.info(
-            "sync_from tag '%s' not found — syncing %d release(s) newer than it",
-            sync_from,
-            len(newer),
-        )
-    return newer
+    logger.warning("sync_from tag '%s' not found — syncing nothing", sync_from)
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -156,18 +49,18 @@ def _filter_from_sync_point(releases, sync_from):
 # ---------------------------------------------------------------------------
 
 
-@final
 class _RemoteSource:
     """Source backed by a remote API (Gitea/GitHub) + a bare git mirror."""
 
-    def __init__(self, config, cache_dir, dry_run=False):
+    def __init__(self, config, cache_dir):
         self._repo = config.repo
         self._type = config.type
         self._api = get_api_client(config.type, config.api, config.repo, config.token)
-        self._api.ensure_repo_exists(create=not dry_run)
+        self._api.verify_access()
+        repo_slug = config.repo.replace("/", "_")
         self._git = GitRepo.ensure_mirror(
             config.clone_url,
-            Path(cache_dir) / config.mirror_dir_name("source"),
+            Path(cache_dir) / f"source_{config.type}_{repo_slug}.git",
         )
         self._include_prereleases = config.include_prereleases
         self._include_drafts = config.include_drafts
@@ -211,7 +104,7 @@ class _RemoteSource:
             if not tags:
                 logger.warning(
                     "No API releases or git tags found for %s repo '%s'. "
-                    + "If this repository does not use releases/tags, set 'mode: commit' under 'source:' in your config.",
+                    "If this repository does not use releases/tags, set 'mode: commit' under 'source:' in your config.",
                     self._type,
                     self._repo,
                 )
@@ -245,13 +138,13 @@ class _RemoteSource:
             if any(r["tag_name"] == self._sync_from for r in releases):
                 logger.warning(
                     "sync_from tag '%s' is a release but was filtered out (prerelease/draft). "
-                    + "set include_prereleases/include_drafts to include it; syncing nothing for now.",
+                    + "Set include_prereleases/include_drafts to include it; syncing nothing for now.",
                     self._sync_from,
                 )
             elif self._git.tag_exists(self._sync_from):
                 logger.warning(
                     "sync_from tag '%s' has no API release (git tag only). "
-                    + "set source mode: tag to sync from git tags; syncing nothing for now.",
+                    + "Set source mode: tag to sync from git tags; syncing nothing for now.",
                     self._sync_from,
                 )
             else:
@@ -270,7 +163,7 @@ class _RemoteSource:
         if not sorted_tags and self._mode == "tag":
             logger.warning(
                 "No git tags found for %s repo '%s'. "
-                + "If this repository does not use tags, set 'mode: commit' under 'source:' in your config.",
+                "If this repository does not use tags, set 'mode: commit' under 'source:' in your config.",
                 self._type,
                 self._repo,
             )
@@ -302,8 +195,8 @@ class _RemoteSource:
         if self._sync_from:
             logger.warning(
                 "sync_from is set but has no effect in commit mode — "
-                + "state already prevents re-syncing the same SHA. "
-                + "Remove sync_from from your config to suppress this warning."
+                "state already prevents re-syncing the same SHA. "
+                "Remove sync_from from your config to suppress this warning."
             )
 
         branch = self._branch or None  # pass None to trigger auto-detect
@@ -352,7 +245,6 @@ class _RemoteSource:
         return self._git.git_dir
 
 
-@final
 class _LocalSource:
     """Source backed by a local git repository — tags are 'releases'."""
 
@@ -394,10 +286,10 @@ class _LocalSource:
         ref = rel.get("commit_sha") or rel.get("tag_name", "")
         self._git.export_commit(ref, dest)
 
-    def download_asset(self, _asset, _dest):
+    def download_asset(self, asset, dest):
         pass
 
-    def list_release_assets(self, _release_id):
+    def list_release_assets(self, release_id):
         return []
 
     @property

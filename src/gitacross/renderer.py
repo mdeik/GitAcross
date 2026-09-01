@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import fnmatch
 import logging
 import re
@@ -9,7 +7,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def apply_operations(work_dir, project_config):
+def apply_operations(work_dir, project):
     """Run the full render pipeline on *work_dir* after source tag overlay.
 
     1. Remove paths in `ignore` (glob list, always first).
@@ -17,10 +15,10 @@ def apply_operations(work_dir, project_config):
     """
     work = Path(work_dir)
 
-    for pattern in project_config.renderer.ignore:
+    for pattern in project.renderer.ignore:
         _remove_glob(work, pattern)
 
-    for op in project_config.renderer.operations:
+    for op in project.renderer.operations:
         if "remove" in op:
             _op_remove(work, op["remove"])
         elif "rename" in op:
@@ -132,8 +130,9 @@ def _op_replace(work, ops):
             if path_filter:
                 if str(rel) != path_filter:
                     continue
-            elif glob_filter and not fnmatch.fnmatch(str(rel), glob_filter):
-                continue
+            elif glob_filter:
+                if not fnmatch.fnmatch(str(rel), glob_filter):
+                    continue
 
             try:
                 text = f.read_text("utf-8")
@@ -196,17 +195,9 @@ def _match_case(matched, replacement):
 def _op_add(work, ops):
     """Create files in the work tree before commit.
 
-    Each op: {path: str, content?: str, src?: str}
-    - content: inline file contents — takes precedence over ``src`` when both
-      are given (even an empty string). Written as UTF-8 text with ``\n`` line
-      endings on every OS.
-    - src: path of an existing regular file to copy in — binary-safe (no
-      decode/encode round-trip) via :func:`shutil.copy2`, so the bytes as well
-      as the mode/timestamps are preserved. Directories are rejected; relative
-      paths resolve against the current working directory.
-    If neither is given the file is created empty. Raises if the path already
-    exists (avoids silently overwriting). Creates parent directories
-    automatically.
+    Each op: {path: str, content: str}
+    Raises if the path already exists (avoids silently overwriting).
+    Creates parent directories automatically.
     """
     for op in ops:
         path = op["path"]
@@ -214,35 +205,8 @@ def _op_add(work, ops):
         if target.exists():
             raise RuntimeError(f"Add conflict: '{path}' already exists")
         target.parent.mkdir(parents=True, exist_ok=True)
-        content = op.get("content")
-        if content is not None:
-            _write_text_lf(target, content)
-        else:
-            src = op.get("src")
-            if not src:
-                _write_text_lf(target, "")
-            else:
-                source = Path(src)
-                if not source.is_file():
-                    if source.exists():
-                        raise RuntimeError(
-                            f"Add failed: 'src' '{src}' is not a file (path: '{path}') — only regular files can be added"
-                        )
-                    raise RuntimeError(
-                        f"Add failed: source file '{src}' not found for '{path}'"
-                    )
-                _ = shutil.copy2(source, target)
+        target.write_text(op.get("content", ""), encoding="utf-8")
         logger.debug("Added file: %s", path)
-
-
-def _write_text_lf(path, text):
-    """Write *text* as UTF-8 with ``\n`` endings regardless of the host OS.
-
-    Text mode on Windows would otherwise translate ``\n`` to ``\r\n``
-    (``os.linesep``), making inline content depend on where gitacross runs.
-    """
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        _ = f.write(text)
 
 
 def _op_validate(work, ops):
@@ -273,12 +237,13 @@ def _op_validate(work, ops):
                 raise RuntimeError(
                     f"Validation failed: '{pattern}' not found in '{path}'"
                 )
-        elif assert_type == "string_absent" and target.exists():
-            content = target.read_text("utf-8", errors="replace")
-            if _contains(content, pattern, case_sensitive):
-                raise RuntimeError(
-                    f"Validation failed: '{pattern}' found in '{path}'"
-                )
+        elif assert_type == "string_absent":
+            if target.exists():
+                content = target.read_text("utf-8", errors="replace")
+                if _contains(content, pattern, case_sensitive):
+                    raise RuntimeError(
+                        f"Validation failed: '{pattern}' found in '{path}'"
+                    )
 
 
 def _contains(content, pattern, case_sensitive):

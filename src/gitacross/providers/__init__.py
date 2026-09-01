@@ -8,7 +8,6 @@ To add a new provider:
 That's it — ``source.py`` and ``target.py`` use ``get_api_client`` and never
 need to know which concrete class was returned.
 """
-from __future__ import annotations
 
 from .gitea import GiteaClient
 from .github import GitHubClient
@@ -17,12 +16,6 @@ _REGISTRY: dict = {
     "gitea": GiteaClient,
     "github": GitHubClient,
 }
-
-# Single source of truth for valid endpoint types. Factories (source.py,
-# target.py), config validation, and the linter all dispatch on these sets.
-REMOTE_TYPES = frozenset(_REGISTRY)
-LOCAL_TYPES = frozenset({"local"})
-ENDPOINT_TYPES = REMOTE_TYPES | LOCAL_TYPES
 
 
 def get_api_client(provider_type: str, api: str, repo: str, token: str):
@@ -33,7 +26,7 @@ def get_api_client(provider_type: str, api: str, repo: str, token: str):
     """
     cls = _REGISTRY.get(provider_type)
     if cls is None:
-        known = ", ".join(sorted(REMOTE_TYPES))
+        known = ", ".join(sorted(_REGISTRY))
         raise ValueError(
             f"Unknown provider type '{provider_type}' — known types: {known}"
         )
@@ -48,12 +41,4 @@ def register_provider(name: str, cls) -> None:
     _REGISTRY[name] = cls
 
 
-__all__ = [
-    "ENDPOINT_TYPES",
-    "LOCAL_TYPES",
-    "REMOTE_TYPES",
-    "GitHubClient",
-    "GiteaClient",
-    "get_api_client",
-    "register_provider",
-]
+__all__ = ["get_api_client", "register_provider", "GiteaClient", "GitHubClient"]

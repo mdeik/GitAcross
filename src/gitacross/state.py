@@ -1,12 +1,8 @@
-from __future__ import annotations
-
 from pathlib import Path
-from typing import final
 
 import yaml
 
 
-@final
 class State:
     """Persistent state tracking which releases have been synced.
 
@@ -26,25 +22,36 @@ class State:
         return f"State(work_dir={str(self.work_dir)!r})"
 
     def _load(self):
-        data = {}
         if self.path.exists():
             with open(self.path) as f:
-                data = yaml.safe_load(f)
-        # Tolerate degenerate or hand-edited YAML (e.g. a bare ``projects:``
-        # key with no value, non-map documents, or null entries) so a corrupt
-        # state file can never crash a run — it is simply treated as empty.
-        if not isinstance(data, dict):
+                data = yaml.safe_load(f) or {}
+        else:
             data = {}
-        projects = data.get("projects")
-        if not isinstance(projects, dict):
-            projects = {}
-            data["projects"] = projects
-        for name, project in list(projects.items()):
-            if not isinstance(project, dict):
-                projects[name] = {}
-            elif not isinstance(project.get("releases"), dict):
-                project["releases"] = {}
+        self._migrate_entries(data)
         return data
+
+    @staticmethod
+    def _migrate_entries(data):
+        """Re-key release entries by tag name and migrate field names."""
+        projects = data.get("projects") or {}
+        for project in projects.values():
+            releases = project.get("releases")
+            if not isinstance(releases, dict):
+                continue
+            for key, entry in list(releases.items()):
+                if not isinstance(entry, dict):
+                    continue
+                # Remove deprecated commit_sha
+                entry.pop("commit_sha", None)
+                # Rename published_at -> source_date
+                if "published_at" in entry and "source_date" not in entry:
+                    entry["source_date"] = entry.pop("published_at")
+                tag = entry.get("tag")
+                if not tag or str(key) == str(tag):
+                    continue
+                if str(tag) not in releases:
+                    releases[str(tag)] = entry
+                del releases[key]
 
     def has_release(self, project_name, tag_name):
         releases = (
@@ -63,4 +70,4 @@ class State:
         tmp = self.path.with_suffix(".tmp")
         with open(tmp, "w") as f:
             yaml.dump(self._data, f, default_flow_style=False)
-        _ = tmp.replace(self.path)
+        tmp.replace(self.path)

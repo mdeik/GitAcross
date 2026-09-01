@@ -2,13 +2,12 @@
 
 Supported types: gitea, github, local.
 """
-from __future__ import annotations
 
 import logging
 from pathlib import Path
 
 from .git import GitRepo
-from .providers import ENDPOINT_TYPES, REMOTE_TYPES, get_api_client
+from .providers import get_api_client
 from .retry import retry
 
 logger = logging.getLogger(__name__)
@@ -19,11 +18,9 @@ def create_target(config, cache_dir, retry_max=3, retry_backoff=2, author=None):
     t = config.type
     if t == "local":
         return _LocalTarget(config, author=author)
-    if t in REMOTE_TYPES:
+    if t in ("gitea", "github"):
         return _RemoteTarget(config, cache_dir, retry_max, retry_backoff, author=author)
-    raise ValueError(
-        f"Unknown target type: {t} — expected one of {sorted(ENDPOINT_TYPES)}"
-    )
+    raise ValueError(f"Unknown target type: {t}")
 
 
 def _resolve_author(author):
@@ -54,11 +51,12 @@ class _RemoteTarget:
         if not clone_url:
             raise RuntimeError(
                 f"Could not determine clone URL for '{config.repo}'. "
-                "set clone_url in the target config or ensure the API returns it."
+                "Set clone_url in the target config or ensure the API returns it."
             )
+        repo_slug = config.repo.replace("/", "_")
         self._git = GitRepo.ensure_mirror(
             clone_url,
-            Path(cache_dir) / config.mirror_dir_name("target"),
+            Path(cache_dir) / f"target_{config.type}_{repo_slug}.git",
         )
         self._retry_max = retry_max
         self._retry_backoff = retry_backoff
@@ -120,15 +118,10 @@ class _RemoteTarget:
 
 
 class _LocalTarget:
-    """Target backed by a local git repo — no push, no API release.
-
-    The repository at ``config.path`` is created on demand (directory plus
-    ``git init``) if it does not exist yet, so a local target can point at a
-    brand-new backup/mirror location.
-    """
+    """Target backed by a local git repo — no push, no API release."""
 
     def __init__(self, config, author=None):
-        self._git = GitRepo.ensure_local(config.path)
+        self._git = GitRepo.local(config.path)
         self._author = author
 
     def setup(self, branch):
