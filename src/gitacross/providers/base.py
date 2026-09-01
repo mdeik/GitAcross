@@ -83,16 +83,23 @@ class BaseAPIClient:
     # Repository management
     # ------------------------------------------------------------------
 
-    def ensure_repo_exists(self):
+    def ensure_repo_exists(self, create=True):
         """Ensure the repo exists on the platform, creating it if not.
 
         Returns the repo metadata dict (includes clone_url, ssh_url, etc.).
         Raises ``RuntimeError`` on auth errors or inaccessible repos.
+        Pass ``create=False`` to check for existence without ever creating
+        the repo (used by dry-run mode, which must not mutate anything).
         """
         try:
             return self._request("GET", "")
         except urllib.error.HTTPError as e:
             if e.code == 404:
+                if not create:
+                    raise RuntimeError(
+                        f"{self._platform_name} repo '{self.repo}' does not exist "
+                        + "(dry-run mode creates nothing)"
+                    ) from e
                 logger.info(
                     "%s repo '%s' not found — creating it automatically",
                     self._platform_name,

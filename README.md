@@ -49,6 +49,15 @@ For development, install the local checkout:
 pip install -e .
 ```
 
+### Tests
+
+```bash
+pip install -e .[dev]   # pytest + pytest-cov
+pytest                  # run the test suite
+pytest --cov=gitacross  # run with a coverage floor (90% line + branch)
+ruff check src tests    # lint
+```
+
 ### Config
 
 GitAcross reads a YAML file listing the mirrors you want. Each entry in the `projects` list is a **project**: it has a `source` (where releases come from) and a `target` (where they go).

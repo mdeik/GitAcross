@@ -132,9 +132,8 @@ def _op_replace(work, ops):
             if path_filter:
                 if str(rel) != path_filter:
                     continue
-            elif glob_filter:
-                if not fnmatch.fnmatch(str(rel), glob_filter):
-                    continue
+            elif glob_filter and not fnmatch.fnmatch(str(rel), glob_filter):
+                continue
 
             try:
                 text = f.read_text("utf-8")
@@ -239,13 +238,12 @@ def _op_validate(work, ops):
                 raise RuntimeError(
                     f"Validation failed: '{pattern}' not found in '{path}'"
                 )
-        elif assert_type == "string_absent":
-            if target.exists():
-                content = target.read_text("utf-8", errors="replace")
-                if _contains(content, pattern, case_sensitive):
-                    raise RuntimeError(
-                        f"Validation failed: '{pattern}' found in '{path}'"
-                    )
+        elif assert_type == "string_absent" and target.exists():
+            content = target.read_text("utf-8", errors="replace")
+            if _contains(content, pattern, case_sensitive):
+                raise RuntimeError(
+                    f"Validation failed: '{pattern}' found in '{path}'"
+                )
 
 
 def _contains(content, pattern, case_sensitive):

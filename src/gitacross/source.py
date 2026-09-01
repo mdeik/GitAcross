@@ -10,23 +10,25 @@ from pathlib import Path
 from typing import final
 
 from .git import GitRepo
-from .providers import get_api_client
+from .providers import ENDPOINT_TYPES, REMOTE_TYPES, get_api_client
 
 logger = logging.getLogger(__name__)
 
 
-def create_source(config, cache_dir):
+def create_source(config, cache_dir, dry_run=False):
     """Factory: build a Source endpoint from the config."""
     t = config.type
     if t == "local":
         return _LocalSource(config)
-    if t in ("gitea", "github"):
+    if t in REMOTE_TYPES:
         if config.mode not in ("release", "tag", "commit"):
             raise ValueError(
                 f"Unknown source mode '{config.mode}' — expected 'release', 'tag', or 'commit'"
             )
-        return _RemoteSource(config, cache_dir)
-    raise ValueError(f"Unknown source type: {t}")
+        return _RemoteSource(config, cache_dir, dry_run=dry_run)
+    raise ValueError(
+        f"Unknown source type: {t} — expected one of {sorted(ENDPOINT_TYPES)}"
+    )
 
 
 def _filter_from_sync_point(releases, sync_from):
@@ -55,15 +57,14 @@ def _filter_from_sync_point(releases, sync_from):
 class _RemoteSource:
     """Source backed by a remote API (Gitea/GitHub) + a bare git mirror."""
 
-    def __init__(self, config, cache_dir):
+    def __init__(self, config, cache_dir, dry_run=False):
         self._repo = config.repo
         self._type = config.type
         self._api = get_api_client(config.type, config.api, config.repo, config.token)
-        self._api.ensure_repo_exists()
-        repo_slug = config.repo.replace("/", "_")
+        self._api.ensure_repo_exists(create=not dry_run)
         self._git = GitRepo.ensure_mirror(
             config.clone_url,
-            Path(cache_dir) / f"source_{config.type}_{repo_slug}.git",
+            Path(cache_dir) / f"source_{config.type}_{config.repo_slug}.git",
         )
         self._include_prereleases = config.include_prereleases
         self._include_drafts = config.include_drafts
