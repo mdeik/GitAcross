@@ -169,7 +169,7 @@ projects:
 
     target:
       type: local
-      path: /path/to/backup/repo   # created (mkdir + git init) if it does not exist yet
+      path: /path/to/backup/repo
       branch: mirror
 
     renderer:

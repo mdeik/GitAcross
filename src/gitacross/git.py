@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import io
 import logging
 import os
@@ -7,7 +5,6 @@ import re
 import subprocess
 import tarfile
 from pathlib import Path
-from typing import final
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +34,9 @@ def _log_git_stderr(command, returncode, stderr, level):
         )
 
 
-def _git(*args, check=True, input_data=None, text=True, env=None, safe_dir=None):
-    cmd = ["git"]
-    if safe_dir:
-        # Git refuses to operate in a repository owned by another user
-        # ("dubious ownership"). The bare mirrors under the cache dir are
-        # created and managed by gitacross itself, so whitelist exactly that
-        # directory for this one invocation via -c — never written to a config.
-        cmd += ["-c", f"safe.directory={Path(safe_dir).resolve()}"]
-    cmd += [str(a) for a in args]
-    logger.debug("> git %s", _redact(" ".join(str(a) for a in cmd[1:])))
+def _git(*args, check=True, input_data=None, text=True, env=None):
+    cmd = ["git"] + [str(a) for a in args]
+    logger.debug("> git %s", _redact(" ".join(str(a) for a in args)))
     try:
         result = subprocess.run(
             cmd,
@@ -63,19 +53,12 @@ def _git(*args, check=True, input_data=None, text=True, env=None, safe_dir=None)
             if isinstance(part, str):
                 e.cmd[i] = _redact(part)
         raise
-    except FileNotFoundError as exc:
-        # subprocess can't find the `git` binary at all — give a clear error
-        # instead of the raw "[Errno 2] No such file or directory: 'git'".
-        raise ValueError(
-            "git executable not found — install Git and make sure it is on PATH."
-        ) from exc
     if result.returncode != 0:
         # check=False path — callers inspect the return code themselves
         _log_git_stderr(args[0], result.returncode, result.stderr, level=logging.DEBUG)
     return result
 
 
-@final
 class GitRepo:
     """A git repository for release operations.
 
@@ -100,122 +83,34 @@ class GitRepo:
         path = Path(dest)
         if path.exists():
             # Update remote URL *before* fetching so token rotation takes effect
-            current = _git(
-                "-C", str(path), "remote", "get-url", "origin",
-                check=False, safe_dir=path,
-            )
+            current = _git("-C", str(path), "remote", "get-url", "origin", check=False)
             if current.returncode == 0 and current.stdout.strip() != url:
-                _ = _git(
-                    "-C", str(path), "remote", "set-url", "origin", url,
-                    safe_dir=path,
-                )
+                _git("-C", str(path), "remote", "set-url", "origin", url)
                 logger.info("Updated remote URL for mirror at %s", dest)
-            _ = _git(
-                "-C", str(path), "fetch", "--tags", "--prune", "origin",
-                safe_dir=path,
-            )
+            _git("-C", str(path), "fetch", "--tags", "--prune", "origin")
             logger.info("Updated mirror at %s", dest)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            _ = _git("clone", "--mirror", url, str(path), safe_dir=path)
+            _git("clone", "--mirror", url, str(path))
             logger.info("Cloned mirror from %s", _redact(url))
         # Ensure author identity for automated commits
-        _ = _git("-C", str(path), "config", "user.name", "GitAcross", safe_dir=path)
-        _ = _git("-C", str(path), "config", "user.email", "sync@gitacross", safe_dir=path)
+        _git("-C", str(path), "config", "user.name", "GitAcross")
+        _git("-C", str(path), "config", "user.email", "sync@gitacross")
         return cls(path, is_bare=True)
 
     @classmethod
     def local(cls, path):
-        """Open an existing local git repository.
-
-        *path* must be the root of its own git working tree. Git resolves a
-        path that merely lives *inside* a repository to the nearest enclosing
-        repository, so without this check a configured path that is not itself
-        a git repository would silently commit to and reset that enclosing
-        repo — e.g. the directory the tool is being run from — instead of the
-        configured location.
-        """
+        """Open an existing local git repository."""
         p = Path(path)
-        result = _git("-C", str(p), "rev-parse", "--show-toplevel", check=False)
-        if result.returncode != 0:
+        result = _git("-C", str(p), "rev-parse", "--git-dir")
+        git_dir = p / result.stdout.strip()
+        if not git_dir.exists():
             raise ValueError(f"Not a git repository: {path}")
-        root = Path(result.stdout.strip())
-        if Path(p).resolve() != root.resolve():
-            raise ValueError(
-                f"Not a git repository: {path} — it is inside the git repository "
-                + f"'{root}'. A local endpoint path must point at a repository "
-                + f"root; run 'git init' in {path} or point the path at {root}."
-            )
-        git_dir = _git("-C", str(root), "rev-parse", "--absolute-git-dir")
-        return cls(Path(git_dir.stdout.strip()), is_bare=False)
-
-    @classmethod
-    def ensure_local(cls, path):
-        """Open a local git repository at *path*, creating it if necessary.
-
-        Unlike :meth:`local`, a missing directory or a plain directory that is
-        not yet a git repository is accepted: the directory is created
-        (including parents) and ``git init`` is run there. Used for local
-        *targets*, which receive commits. Local *sources* still go through
-        :meth:`local` so a misconfigured source path is reported instead of
-        silently yielding an empty repository.
-
-        An existing repository is opened as-is and never re-initialised. If
-        *path* already holds git metadata that cannot be used as a working tree
-        (a bare repository, a git-internal directory, or a broken ``.git``
-        marker), a :class:`ValueError` is raised instead of overwriting it.
-        """
-        if not path or not str(path).strip():
-            raise ValueError(
-                "Local target path is empty — set 'path' to the directory where "
-                + "the mirrored repository should live."
-            )
-        try:
-            return cls.local(path)
-        except ValueError:
-            pass
-
-        # Only auto-initialise when the directory is genuinely not a git
-        # repository yet — never run `git init` over existing git metadata
-        # (re-initialising a bare repo pollutes it with a nested .git).
-        p = Path(path)
-        if p.exists() and not p.is_dir():
-            raise ValueError(f"Local target path is not a directory: {path}")
-        if (p / ".git").exists():
-            raise ValueError(
-                f"Not initialising {path}: it already contains a '.git' entry "
-                + "that is not a usable working tree. Refusing to overwrite it — "
-                + "fix or remove that repository, or point the local target at a "
-                + "missing or empty directory."
-            )
-        if (p / "HEAD").is_file() and (p / "objects").is_dir():
-            raise ValueError(
-                f"Not initialising {path}: it is a bare git repository or git's "
-                + "internal directory. Local targets need a working tree, and "
-                + "existing repositories are never re-initialised."
-            )
-        p.mkdir(parents=True, exist_ok=True)
-        _ = _git("init", str(p))
-        # Give a fresh repo a repo-local identity so commits never depend on
-        # the ambient git config (mirrors get the same treatment in
-        # ensure_mirror). Existing repos are opened as-is and left untouched.
-        _ = _git("-C", str(p), "config", "user.name", "GitAcross")
-        _ = _git("-C", str(p), "config", "user.email", "sync@gitacross")
-        logger.info("Initialised git repository at %s", p)
-        return cls.local(path)
+        return cls(git_dir, is_bare=False)
 
     def _g(self, *args, text=True, env=None, **kwargs):
         """Run git command with --git-dir set."""
-        return _git(
-            "--git-dir",
-            str(self.git_dir),
-            *args,
-            text=text,
-            env=env,
-            # Mirrors are gitacross-managed; whitelist them for the ownership check.
-            safe_dir=self.git_dir if self.is_bare else None,
-            **kwargs,
-        )
+        return _git("--git-dir", str(self.git_dir), *args, text=text, env=env, **kwargs)
 
     def _gw(self, work_dir, *args, env=None, **kwargs):
         """Run git command with --git-dir and --work-tree set."""
@@ -226,8 +121,6 @@ class GitRepo:
             str(work_dir),
             *args,
             env=env,
-            # Mirrors are gitacross-managed; whitelist them for the ownership check.
-            safe_dir=self.git_dir if self.is_bare else None,
             **kwargs,
         )
 
@@ -270,11 +163,6 @@ class GitRepo:
 
     def export_commit(self, commit_sha, dest):
         """Export a commit's file tree into *dest* (empty dir recommended)."""
-        # git archive of an empty tree emits a dangling pax_global_header that
-        # tarfile can't read, so skip archiving when the tree has no files.
-        tree = self._g("ls-tree", "-r", "--name-only", commit_sha, check=False)
-        if tree.returncode != 0 or not tree.stdout.strip():
-            return
         result = self._g("archive", commit_sha, "--format=tar", text=False)
         with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r|") as tar:
             tar.extractall(path=str(dest))
@@ -292,7 +180,7 @@ class GitRepo:
         # Already exists locally
         local = self._g("show-ref", "--verify", f"refs/heads/{branch}", check=False)
         if local.returncode == 0:
-            _ = self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+            self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
             return
 
         # Exists on remote
@@ -300,12 +188,12 @@ class GitRepo:
             "show-ref", "--verify", f"refs/remotes/origin/{branch}", check=False
         )
         if remote.returncode == 0:
-            _ = self._g("branch", "--force", branch, f"origin/{branch}")
-            _ = self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+            self._g("branch", "--force", branch, f"origin/{branch}")
+            self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
             return
 
         # Brand new branch — just set HEAD, the ref is created on first commit
-        _ = self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
+        self._g("symbolic-ref", "HEAD", f"refs/heads/{branch}")
 
     def commit(self, work_dir, message, date=None, author_name=None, author_email=None):
         """Stage all files in *work_dir* and commit on current branch.
@@ -316,7 +204,7 @@ class GitRepo:
         If *author_name* and/or *author_email* are provided, they override the
         git identity for this commit (both author and committer).
         """
-        _ = self._gw(work_dir, "add", "-A")
+        self._gw(work_dir, "add", "-A")
         env = dict(os.environ)
         if date:
             env.update({
@@ -351,25 +239,25 @@ class GitRepo:
 
     def tag(self, name, message):
         """Create (or force-update) an annotated tag."""
-        _ = self._g("tag", "-f", name, "-m", message)
+        self._g("tag", "-f", name, "-m", message)
 
     def reset_worktree(self):
         """Populate the working tree to match HEAD. No-op for bare repos."""
         if not self.is_bare:
-            _ = _git("-C", str(self.git_dir.parent), "reset", "--hard", "HEAD")
+            _git("-C", str(self.git_dir.parent), "reset", "--hard", "HEAD")
 
     def push(self, remote, *refs):
         """Push specific refs to remote."""
         # Mirrors (cloned with --mirror) reject explicit refspecs by default.
         # Temporarily disable mirror mode so we can push only the refs we need.
         if self.is_bare:
-            _ = self._g("config", "--local", "remote.origin.mirror", "false")
+            self._g("config", "--local", "remote.origin.mirror", "false")
             try:
-                _ = self._g("push", remote, *refs)
+                self._g("push", remote, *refs)
             finally:
-                _ = self._g("config", "--local", "remote.origin.mirror", "true")
+                self._g("config", "--local", "remote.origin.mirror", "true")
         else:
-            _ = self._g("push", remote, *refs)
+            self._g("push", remote, *refs)
 
     def tag_exists(self, tag):
         """Check if a tag exists locally."""

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import fnmatch
 import logging
 import re
@@ -9,7 +7,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def apply_operations(work_dir, project_config):
+def apply_operations(work_dir, project):
     """Run the full render pipeline on *work_dir* after source tag overlay.
 
     1. Remove paths in `ignore` (glob list, always first).
@@ -17,10 +15,10 @@ def apply_operations(work_dir, project_config):
     """
     work = Path(work_dir)
 
-    for pattern in project_config.renderer.ignore:
+    for pattern in project.renderer.ignore:
         _remove_glob(work, pattern)
 
-    for op in project_config.renderer.operations:
+    for op in project.renderer.operations:
         if "remove" in op:
             _op_remove(work, op["remove"])
         elif "rename" in op:
@@ -132,8 +130,9 @@ def _op_replace(work, ops):
             if path_filter:
                 if str(rel) != path_filter:
                     continue
-            elif glob_filter and not fnmatch.fnmatch(str(rel), glob_filter):
-                continue
+            elif glob_filter:
+                if not fnmatch.fnmatch(str(rel), glob_filter):
+                    continue
 
             try:
                 text = f.read_text("utf-8")
@@ -238,12 +237,13 @@ def _op_validate(work, ops):
                 raise RuntimeError(
                     f"Validation failed: '{pattern}' not found in '{path}'"
                 )
-        elif assert_type == "string_absent" and target.exists():
-            content = target.read_text("utf-8", errors="replace")
-            if _contains(content, pattern, case_sensitive):
-                raise RuntimeError(
-                    f"Validation failed: '{pattern}' found in '{path}'"
-                )
+        elif assert_type == "string_absent":
+            if target.exists():
+                content = target.read_text("utf-8", errors="replace")
+                if _contains(content, pattern, case_sensitive):
+                    raise RuntimeError(
+                        f"Validation failed: '{pattern}' found in '{path}'"
+                    )
 
 
 def _contains(content, pattern, case_sensitive):

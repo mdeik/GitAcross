@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """GitAcross – mirror releases from any configured source to any target.
 
-This module holds the sync engine (:func:`sync_project`, :func:`run`); the
-``gitacross`` command-line entry point lives in :mod:`gitacross.cli`.
+Usage:
+    gitacross --config config.yml [--project NAME] [--dry-run]
+    python -m gitacross --config config.yml [--project NAME] [--dry-run]
 """
-from __future__ import annotations
 
+import argparse
+from datetime import datetime
 import fnmatch
 import logging
 import shutil
+import sys
 import tempfile
-from collections.abc import Mapping
-from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
 
-from .config import Config, ProjectConfig
+from .config import Config
 from .renderer import apply_operations
 from .retry import retry
 from .source import create_source
@@ -24,10 +24,14 @@ from .target import create_target
 
 logger = logging.getLogger(__name__)
 
-# Default directory for state.yml and cache/ — used by run(), sync_project(),
-# and the CLI --workdir flag so they can't drift apart.
-DEFAULT_WORK_DIR = ".gitsync"
 
+def _setup_logging(verbose):
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 
 def _clean_text(text):
@@ -39,53 +43,18 @@ def _clean_text(text):
     return text
 
 
-class _SafeFormatter:
-    """Minimal mapping for ``format_map`` — unknown keys render literally as ``{key}``."""
-
-    def __init__(self, **values: str):
-        self._values: dict[str, str] = values
-
-    def __getitem__(self, key):
-        return self._values.get(key, "{" + key + "}")
+class _SafeFormatter(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
 
 
-def _render_template(template: str, context: Mapping[str, Any]) -> str:
+def _render_template(template: str, context: dict) -> str:
     if not template:
         return ""
     try:
         return template.format_map(_SafeFormatter(**context))
-    except (IndexError, KeyError, TypeError, ValueError):
+    except Exception:
         return template
-
-
-def _release_context(rel, source, project_config):
-    """Build the per-release values shared by the dry-run and real sync loops.
-
-    Returns ``(tag, commit_mode, source_commit, short_sha, source_date,
-    raw_body, context)``. ``commit_mode`` is ``True`` when the release has no
-    tag (a raw commit snapshot).
-    """
-    tag = rel["tag_name"]
-    commit_mode = tag is None
-    source_commit = rel.get("commit_sha") or ""
-    if not source_commit and not commit_mode and hasattr(source, "resolve_commit"):
-        source_commit = source.resolve_commit(tag)
-    short_sha = str(source_commit or (rel.get("commit_sha") or ""))[:12]
-    source_date = rel.get("source_date") or rel.get("published_at") or ""
-    raw_body = _clean_text(rel.get("body", ""))
-    release_name = _clean_text(rel.get("name") or tag or "")
-    context = {
-        "tag": tag or "",
-        "commit_sha": source_commit,
-        "short_sha": short_sha,
-        "project_name": project_config.name,
-        "name": project_config.name,
-        "source_date": source_date,
-        "body": raw_body,
-        "description": raw_body,
-        "release_name": release_name,
-    }
-    return tag, commit_mode, source_commit, short_sha, source_date, raw_body, context
 
 
 def _matches_asset_filter(asset_name, filter_spec):
@@ -143,8 +112,8 @@ def _sync_release_assets(
         asset_path = asset_dir / name
 
         logger.info("Downloading asset %s (%s bytes) from source", name, size)
-        _ = retry(
-            lambda a=asset, p=asset_path: source.download_asset(a, p),
+        retry(
+            lambda: source.download_asset(asset, asset_path),
             max_attempts=retry_max,
             backoff_seconds=retry_backoff,
         )
@@ -159,17 +128,17 @@ def _sync_release_assets(
 
 
 def sync_project(
-    project_config: ProjectConfig,
-    work_dir: str | Path = DEFAULT_WORK_DIR,
+    project: "ProjectConfig",
+    work_dir: str = ".gitsync",
     dry_run: bool = False,
-    _state: State | None = None,
-) -> list[dict[str, str | None]]:
+    _state: "State" = None,
+) -> list:
     """Sync all new releases for a single project from source to target.
 
     This is the core sync primitive. For most use-cases, prefer the higher-level
     :func:`run` which loads config and state automatically.
 
-    Respects ``project_config.enabled``: if the project is disabled in config this
+    Respects ``project.enabled``: if the project is disabled in config this
     function logs a message and returns immediately without syncing anything,
     matching the behaviour of the CLI.
 
@@ -177,13 +146,12 @@ def sync_project(
     newest last).
 
     Args:
-        project_config: A :class:`~gitacross.ProjectConfig` instance (from
-            ``Config(config_source).projects``).
+        project: A :class:`~gitacross.ProjectConfig` instance (from
+            ``Config.from_path(config_path).projects``).
         work_dir: Directory for ``state.yml`` and ``cache/`` (default
             ``.gitsync``).
         dry_run: When ``True``, log what *would* happen but make no changes
-            to the target repository, the state file, or ``work_dir`` (mirror
-            clones go to a temporary cache dir instead).
+            to the target repository or state file.
         _state: Internal — a shared :class:`~gitacross.State` for callers that
             sync multiple projects in one run (avoids re-reading ``state.yml``
             once per project). Normally ``None``.
@@ -198,286 +166,275 @@ def sync_project(
           repository (``None`` in dry-run mode).
         * ``"source_date"`` (``str``) — ISO timestamp or date of the source release/commit.
     """
-    if not project_config.enabled:
-        logger.info("Skipping disabled project: %s", project_config.name)
+    if not project.enabled:
+        logger.info("Skipping disabled project: %s", project.name)
         return []
 
     logger.info(
         "Syncing project: %s  (%s → %s)",
-        project_config.name,
-        project_config.source.type,
-        project_config.target.type,
+        project.name,
+        project.source.type,
+        project.target.type,
     )
 
     work_dir = Path(work_dir)
     state = _state if _state is not None else State(work_dir)
+    cache_dir = work_dir / "cache"
 
-    # Dry-run must not write to work_dir, so mirror clones go into a temporary
-    # cache dir that is removed when the dry-run finishes.
-    temp_cache_dir: Path | None = None
+    source = create_source(project.source, cache_dir)
+    target = create_target(
+        project.target,
+        cache_dir,
+        retry_max=project.retry.max_attempts,
+        retry_backoff=project.retry.backoff_seconds,
+        author=project.renderer.author,
+    )
+
+    # Fetch releases from source (chronologically ordered oldest-first)
+    all_releases = source.fetch_releases()
+    new_releases = [
+        r for r in all_releases
+        if not state.has_release(
+            project.name,
+            # Commit mode: key by SHA; release/tag mode: key by tag name
+            r["commit_sha"] if r.get("tag_name") is None else r["tag_name"],
+        )
+    ]
+
+    if not new_releases:
+        logger.info("No new releases to sync")
+        return []
+
+    logger.info("Found %d new release(s)", len(new_releases))
+
+    # Setup target branch
+    target.setup(project.target.branch)
+
+    synced_releases = []
+
     if dry_run:
-        temp_cache_dir = Path(tempfile.mkdtemp(prefix="gitsync-cache-"))
-        cache_dir = temp_cache_dir
-    else:
-        cache_dir = work_dir / "cache"
-
-    try:
-        source = create_source(project_config.source, cache_dir, dry_run=dry_run)
-
-        # Dry-run never commits/tags/pushes, so the target is not built at all:
-        # building it would clone a mirror into the cache dir and may create the
-        # repo on the target platform via ensure_repo_exists().
-        if dry_run:
-            target = None
-        else:
-            target = create_target(
-                project_config.target,
-                cache_dir,
-                retry_max=project_config.retry.max_attempts,
-                retry_backoff=project_config.retry.backoff_seconds,
-                author=project_config.renderer.author,
-            )
-
-        # Fetch releases from source (chronologically ordered oldest-first)
-        all_releases = source.fetch_releases()
-        new_releases = [
-            r for r in all_releases
-            if not state.has_release(
-                project_config.name,
-                # Commit mode: key by SHA; release/tag mode: key by tag name
-                r["commit_sha"] if r.get("tag_name") is None else r["tag_name"],
-            )
-        ]
-
-        if not new_releases:
-            logger.info("No new releases to sync")
-            return []
-
-        logger.info("Found %d new release(s)", len(new_releases))
-
-        # Setup target branch (no-op in dry-run: there is no target)
-        if target is not None:
-            target.setup(project_config.target.branch)
-
-        synced_releases = []
-
-        if dry_run:
-            for rel in new_releases:
-                (
-                    tag,
-                    commit_mode,
-                    source_commit,
-                    short_sha,
-                    source_date,
-                    raw_body,
-                    context,
-                ) = _release_context(rel, source, project_config)
-
-                tmpdir = Path(tempfile.mkdtemp(prefix="gitsync-"))
-                try:
-                    if hasattr(source, "export_release"):
-                        source.export_release(rel, tmpdir)
-                    else:
-                        source.export_tag(tag, tmpdir)
-                    apply_operations(tmpdir, project_config)
-                    files = sorted(tmpdir.rglob("*"))
-                    if project_config.commit_message:
-                        dry_msg = _render_template(project_config.commit_message, context)
-                    else:
-                        dry_msg = f"commit {short_sha}" if commit_mode else f"Release {tag}"
-                    logger.info(
-                        "[DRY-RUN] Would commit and push: %s (%d files)",
-                        dry_msg,
-                        len(files),
-                    )
-                    if project_config.sync_assets and not commit_mode:
-                        _sync_release_assets(
-                            source=source,
-                            target=target,
-                            rel=rel,
-                            tag=tag,
-                            target_release=None,
-                            sync_assets=project_config.sync_assets,
-                            tmpdir=tmpdir,
-                            retry_max=project_config.retry.max_attempts,
-                            retry_backoff=project_config.retry.backoff_seconds,
-                            dry_run=True,
-                            stream_assets=project_config.stream_assets,
-                        )
-                    synced_releases.append({
-                        "tag": tag,
-                        "source_commit": source_commit,
-                        "target_commit": None,
-                        "source_date": source_date,
-                    })
-                finally:
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-            return synced_releases
-
-        # Dry-run returned above; from here on the target always exists.
-        assert target is not None
         for rel in new_releases:
-            (
-                tag,
-                commit_mode,
-                source_commit,
-                short_sha,
-                source_date,
-                raw_body,
-                context,
-            ) = _release_context(rel, source, project_config)
-            state_key = rel["commit_sha"] if commit_mode else tag
+            tag = rel["tag_name"]
+            commit_mode = tag is None
+            source_commit = rel.get("commit_sha") or ""
+            if not source_commit and not commit_mode and hasattr(source, "resolve_commit"):
+                source_commit = source.resolve_commit(tag)
+            short_sha = (source_commit or (rel.get("commit_sha") or ""))[:12]
+            source_date = rel.get("source_date") or rel.get("published_at") or ""
+            raw_body = _clean_text(rel.get("body", ""))
+            release_name = _clean_text(rel.get("name") or tag or "")
 
-            if commit_mode:
-                logger.info("Processing commit snapshot: %s", short_sha)
-            else:
-                logger.info("Processing release: %s", tag)
+            context = {
+                "tag": tag or "",
+                "commit_sha": source_commit,
+                "short_sha": short_sha,
+                "project_name": project.name,
+                "name": project.name,
+                "source_date": source_date,
+                "body": raw_body,
+                "description": raw_body,
+                "release_name": release_name,
+            }
 
             tmpdir = Path(tempfile.mkdtemp(prefix="gitsync-"))
             try:
-                # Export source release
                 if hasattr(source, "export_release"):
                     source.export_release(rel, tmpdir)
                 else:
                     source.export_tag(tag, tmpdir)
-                logger.debug(
-                    "Exported %s to work directory",
-                    f"commit {short_sha}" if commit_mode else f"release {tag}",
+                apply_operations(tmpdir, project)
+                files = sorted(tmpdir.rglob("*"))
+                if project.commit_message:
+                    dry_msg = _render_template(project.commit_message, context)
+                else:
+                    dry_msg = f"commit {short_sha}" if commit_mode else f"Release {tag}"
+                logger.info(
+                    "[DRY-RUN] Would commit and push: %s (%d files)",
+                    dry_msg,
+                    len(files),
                 )
-
-                # Apply render pipeline
-                apply_operations(tmpdir, project_config)
-
-                # Commit to target (linear history on target branch)
-                # Use the source release/commit date so commits appear chronologically
-                if project_config.commit_message:
-                    commit_message = _render_template(project_config.commit_message, context)
-                else:
-                    commit_message = (
-                        f"Sync commit {short_sha}" if commit_mode else f"Release {tag}"
-                    )
-                _ = target.commit(tmpdir, commit_message, date=source_date)
-
-                target_release = None
-                if not commit_mode:
-                    # Annotated tag
-                    target.tag(tag, f"Release {tag}")
-
-                    # Push (no-op for local targets)
-                    target.push(project_config.target.branch, tag)
-
-                    # Create release on target platform (no-op for local targets)
-                    if project_config.release_description is not None:
-                        release_body = _render_template(project_config.release_description, context)
-                    elif project_config.preserve_description:
-                        release_body = raw_body
-                    else:
-                        release_body = ""
-                    target_release = target.create_release(
-                        tag=tag,
-                        name=context["release_name"],
-                        body=release_body,
-                        prerelease=bool(rel.get("prerelease", False)),
-                    )
-                else:
-                    # Commit mode: push the branch only (no tag, no release)
-                    target.push(project_config.target.branch)
-
-                # Sync release assets/packages (prebuilts)
-                if project_config.sync_assets and not commit_mode:
+                if project.sync_assets and not commit_mode:
                     _sync_release_assets(
                         source=source,
                         target=target,
                         rel=rel,
                         tag=tag,
-                        target_release=target_release,
-                        sync_assets=project_config.sync_assets,
+                        target_release=None,
+                        sync_assets=project.sync_assets,
                         tmpdir=tmpdir,
-                        retry_max=project_config.retry.max_attempts,
-                        retry_backoff=project_config.retry.backoff_seconds,
-                        dry_run=False,
-                        stream_assets=project_config.stream_assets,
+                        retry_max=project.retry.max_attempts,
+                        retry_backoff=project.retry.backoff_seconds,
+                        dry_run=True,
+                        stream_assets=project.stream_assets,
                     )
-
-                # Persist state (commit mode: keyed by SHA; release/tag: by tag name)
-                target_commit_sha = cast(str, target.head_sha())
-
-                state.add_release(
-                    project_config.name,
-                    state_key,
-                    {
-                        "tag": tag,
-                        "source_commit": source_commit,
-                        "target_commit": target_commit_sha,
-                        "source_date": source_date,
-                        "sync_date": datetime.now().astimezone().isoformat(),
-                    },
-                )
-                state.save()
-
                 synced_releases.append({
+                    "tag": tag,
+                    "source_commit": source_commit,
+                    "target_commit": None,
+                    "source_date": source_date,
+                })
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        return synced_releases
+
+    for rel in new_releases:
+        tag = rel["tag_name"]
+        commit_mode = tag is None  # commit mode: no tag, keyed by SHA
+        state_key = rel["commit_sha"] if commit_mode else tag
+        source_commit = rel.get("commit_sha") or ""
+        if not source_commit and not commit_mode and hasattr(source, "resolve_commit"):
+            source_commit = source.resolve_commit(tag)
+        short_sha = (source_commit or (rel.get("commit_sha") or ""))[:12]
+        source_date = rel.get("source_date") or rel.get("published_at") or ""
+        raw_body = _clean_text(rel.get("body", ""))
+        release_name = _clean_text(rel.get("name") or tag or "")
+
+        context = {
+            "tag": tag or "",
+            "commit_sha": source_commit,
+            "short_sha": short_sha,
+            "project_name": project.name,
+            "name": project.name,
+            "source_date": source_date,
+            "body": raw_body,
+            "description": raw_body,
+            "release_name": release_name,
+        }
+
+        if commit_mode:
+            logger.info("Processing commit snapshot: %s", short_sha)
+        else:
+            logger.info("Processing release: %s", tag)
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="gitsync-"))
+        try:
+            # Export source release
+            if hasattr(source, "export_release"):
+                source.export_release(rel, tmpdir)
+            else:
+                source.export_tag(tag, tmpdir)
+            logger.debug(
+                "Exported %s to work directory",
+                f"commit {short_sha}" if commit_mode else f"release {tag}",
+            )
+
+            # Apply render pipeline
+            apply_operations(tmpdir, project)
+
+            # Commit to target (linear history on target branch)
+            # Use the source release/commit date so commits appear chronologically
+            if project.commit_message:
+                commit_message = _render_template(project.commit_message, context)
+            else:
+                commit_message = (
+                    f"Sync commit {short_sha}" if commit_mode else f"Release {tag}"
+                )
+            target.commit(tmpdir, commit_message, date=source_date)
+
+            target_release = None
+            if not commit_mode:
+                # Annotated tag
+                target.tag(tag, f"Release {tag}")
+
+                # Push (no-op for local targets)
+                target.push(project.target.branch, tag)
+
+                # Create release on target platform (no-op for local targets)
+                if project.release_description is not None:
+                    release_body = _render_template(project.release_description, context)
+                elif project.preserve_description:
+                    release_body = raw_body
+                else:
+                    release_body = ""
+                target_release = target.create_release(
+                    tag=tag,
+                    name=release_name,
+                    body=release_body,
+                    prerelease=rel.get("prerelease", False),
+                )
+            else:
+                # Commit mode: push the branch only (no tag, no release)
+                target.push(project.target.branch)
+
+            # Sync release assets/packages (prebuilts)
+            if project.sync_assets and not commit_mode:
+                _sync_release_assets(
+                    source=source,
+                    target=target,
+                    rel=rel,
+                    tag=tag,
+                    target_release=target_release,
+                    sync_assets=project.sync_assets,
+                    tmpdir=tmpdir,
+                    retry_max=project.retry.max_attempts,
+                    retry_backoff=project.retry.backoff_seconds,
+                    dry_run=False,
+                    stream_assets=project.stream_assets,
+                )
+
+            # Persist state (commit mode: keyed by SHA; release/tag: by tag name)
+            target_commit_sha = target.head_sha()
+
+            state.add_release(
+                project.name,
+                state_key,
+                {
                     "tag": tag,
                     "source_commit": source_commit,
                     "target_commit": target_commit_sha,
                     "source_date": source_date,
-                })
+                    "sync_date": datetime.now().astimezone().isoformat(),
+                },
+            )
+            state.save()
 
-                logger.info(
-                    "Synced %s (target commit %s)",
-                    f"commit {short_sha}" if commit_mode else f"release {tag}",
-                    target_commit_sha,
-                )
+            synced_releases.append({
+                "tag": tag,
+                "source_commit": source_commit,
+                "target_commit": target_commit_sha,
+                "source_date": source_date,
+            })
 
-            except Exception:
-                logger.exception("Failed to sync release %s", tag)
-                raise
-            finally:
-                shutil.rmtree(tmpdir, ignore_errors=True)
+            logger.info(
+                "Synced %s (target commit %s)",
+                f"commit {short_sha}" if commit_mode else f"release {tag}",
+                target_commit_sha,
+            )
 
-        return synced_releases
-    finally:
-        if temp_cache_dir is not None:
-            shutil.rmtree(temp_cache_dir, ignore_errors=True)
+        except Exception:
+            logger.exception("Failed to sync release %s", tag)
+            raise
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return synced_releases
 
 
 def run(
-    config,
-    project_name: str | None = None,
+    config_path,
+    project: str = None,
     dry_run: bool = False,
     reset: bool = False,
-    work_dir: str | Path = DEFAULT_WORK_DIR,
-    clean_cache: bool = False,
+    work_dir: str = ".gitsync",
 ):
-    """Sync releases from a config — the primary Python API entry point.
+    """Sync releases from a config file — the primary Python API entry point.
 
     Loads configuration and state, then syncs every enabled project (or just
-    the one named by *project_name*). Unlike :func:`main`, this function raises
+    the one named by *project*). Unlike :func:`main`, this function raises
     exceptions instead of calling ``sys.exit`` and returns a summary dict for
     each project that was processed.
 
     Args:
-        config:     The configuration to sync from — a :class:`~gitacross.Config`
-            instance, a path to a YAML config file (``str`` or
-            :class:`~pathlib.Path`), or an already-open file-like object
-            (e.g. ``io.StringIO`` holding YAML or an ``open()`` handle).
-            For YAML held in a variable, pass
-            ``Config.from_yaml_string(content)``.
-        project_name: Optional project name to sync. When ``None`` all enabled
+        config_path: Path to the YAML config file (``str`` or
+            :class:`~pathlib.Path`).
+        project:     Optional project name to sync. When ``None`` all enabled
             projects in the config are synced.
         dry_run:     When ``True``, log what *would* happen but make no changes
-            to the target repository, the state file, or ``work_dir``.
+            to the target repository or state file.
         reset:       When ``True``, delete ``work_dir`` (state + cache) before
             syncing so that all releases are treated as new.
         work_dir:    Directory path for ``state.yml`` and ``cache/``.
             Defaults to ``.gitsync``.
-        clean_cache: When ``True``, delete bare mirror clones under
-            ``work_dir/cache/`` that no endpoint in the config references
-            anymore (e.g. after the config changed hosts or repos). Mirrors are
-            disposable clones, so this only ever costs a re-clone. Skipped in
-            dry-run mode. Note: mirrors are identified per config, so if
-            multiple config files share one ``work_dir``, run them with the
-            same ``clean_cache`` setting to avoid deleting each other's
-            mirrors.
 
     Returns:
         A list of dicts — one per enabled project that was attempted — with
@@ -497,42 +454,37 @@ def run(
         Disabled projects are silently omitted from the list.
 
     Raises:
-        FileNotFoundError: If *config* is a path that does not exist.
-        ValueError:        If *project_name* is specified but not found in the config.
-        yaml.YAMLError:    If the config contains invalid YAML.
+        FileNotFoundError: If *config_path* does not exist.
+        ValueError:        If *project* is specified but not found in the config.
 
     Example::
 
         import gitacross
 
-        results = gitacross.run("config.yml", project_name="my-mirror", dry_run=True, work_dir=".gitsync")
+        results = gitacross.run("config.yml", project="my-mirror", dry_run=True, work_dir=".gitsync")
         for r in results:
             latest = r["releases"][-1] if r["releases"] else None
             print(r["project"], f"synced {r['releases_synced']} releases", latest)
     """
-    if not isinstance(config, Config):
-        # Path or open stream — Config() decides which.
-        config = Config(config)
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
     work_dir = Path(work_dir)
 
-    if reset and work_dir.exists():
-        if dry_run:
-            logger.info("[DRY-RUN] Would clear %s/ (state + cache)", work_dir)
-        else:
+    if reset:
+        if work_dir.exists():
             shutil.rmtree(work_dir)
             logger.info("Cleared %s/ (state + cache)", work_dir)
 
-    if not dry_run:
-        work_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
     state = State(work_dir)
 
-    projects = [p for p in config.projects if not project_name or p.name == project_name]
-    if project_name and not projects:
-        raise ValueError(f"Project '{project_name}' not found in config")
+    config = Config.from_path(str(config_path))
 
-    if clean_cache and not dry_run and not reset:
-        _clean_mirror_cache(work_dir, config)
+    projects = [p for p in config.projects if not project or p.name == project]
+    if project and not projects:
+        raise ValueError(f"Project '{project}' not found in config")
 
     results = []
     for proj in projects:
@@ -544,6 +496,8 @@ def run(
             synced_releases = sync_project(
                 proj, work_dir=work_dir, dry_run=dry_run, _state=state
             )
+            if synced_releases is None:
+                synced_releases = []
             results.append({
                 "project": proj.name,
                 "synced": True,
@@ -564,46 +518,75 @@ def run(
     return results
 
 
-def _clean_mirror_cache(work_dir: str | Path, config: Config) -> None:
-    """Delete mirror clones under ``work_dir/cache/`` not referenced by *config*.
+def main():
+    parser = argparse.ArgumentParser(description="Sync releases from source to target")
+    parser.add_argument("--config", required=True, help="Path to config.yml")
+    parser.add_argument("--project", help="Sync only this project (by name)")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print changes without pushing"
+    )
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Clear state and cache before running (fresh start)",
+    )
+    parser.add_argument(
+        "--lint",
+        action="store_true",
+        help="Lint config file for YAML errors, invalid settings, and redundant options",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Automatically fix misplaced keys and remove redundant options in config file",
+    )
+    parser.add_argument(
+        "--workdir",
+        default=".gitsync",
+        help="Directory for state.yml and cache/ (default: .gitsync)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+    args = parser.parse_args()
 
-    Cache keys are deterministic identity names (role, type, host, repo), so a
-    config edit that changes any of those orphans the previous mirror. Orphans
-    are harmless but waste disk, so this removes them. The reference set is
-    built from *every* project in the config — enabled or not — and remote
-    endpoints only, so running a project subset or re-enabling a disabled
-    project never deletes a mirror it still needs.
-    """
-    cache_dir = Path(work_dir) / "cache"
-    if not cache_dir.is_dir():
-        return
-    referenced = {
-        endpoint.mirror_dir_name(role)
-        for proj in config.projects
-        for endpoint, role in ((proj.source, "source"), (proj.target, "target"))
-        if endpoint.is_remote
-    }
-    removed = []
-    for child in sorted(cache_dir.iterdir()):
-        if (
-            child.is_dir()
-            and child.name.endswith(".git")
-            and child.name not in referenced
-        ):
-            shutil.rmtree(child, ignore_errors=True)
-            removed.append(child.name)
-    if removed:
-        logger.info(
-            "Removed %d stale mirror cache(s): %s",
-            len(removed),
-            ", ".join(removed),
+    _setup_logging(args.verbose)
+
+    config_path = Path(args.config)
+
+    if args.fix:
+        if not config_path.exists():
+            sys.exit(f"Config file not found: {config_path}")
+        from .linter import fix_config, lint_config
+
+        fix_report = fix_config(config_path)
+        if not fix_report.is_valid:
+            sys.exit(1)
+        if args.lint:
+            print()
+            lint_report = lint_config(config_path)
+            sys.exit(0 if lint_report.is_valid else 1)
+        sys.exit(0)
+
+    if args.lint:
+        if not config_path.exists():
+            sys.exit(f"Config file not found: {config_path}")
+        from .linter import lint_config
+
+        report = lint_config(config_path)
+        sys.exit(0 if report.is_valid else 1)
+
+    try:
+        results = run(
+            config_path,
+            project=args.project,
+            dry_run=args.dry_run,
+            reset=args.reset,
+            work_dir=args.workdir,
         )
+    except (FileNotFoundError, ValueError) as exc:
+        sys.exit(str(exc))
 
-
-
-
-# Imported at the bottom to avoid a circular import (cli.py imports .main.run).
-from .cli import main  # noqa: I001
+    if any(not r["synced"] for r in results):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

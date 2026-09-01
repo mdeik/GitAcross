@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitacross"
-version = "2.3.1"
+version = "1.1.0"
 description = "Mirror releases and git commits across platforms (Gitea, GitHub, local) with transform pipelines."
 readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
 authors = [
-    { name = "Matthew Deik" }
+    { name = "GitAcross Authors" }
 ]
 keywords = ["git", "gitea", "github", "mirror", "sync", "release"]
 classifiers = [
@@ -33,7 +33,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "pytest-cov>=4.0",
     "build",
     "twine",
 ]
@@ -47,15 +46,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-
-[tool.coverage.run]
-source = ["gitacross"]
-# Keep branch measurement on for the report, but don't gate on it —
-# a 100% branch gate incentivizes line-touching tests over behavior tests.
-branch = true
-
-[tool.coverage.report]
-# Enforcement floor with headroom: catches regressions without demanding
-# 100% (which encourages tests-for-the-sake-of-it on defensive branches).
-fail_under = 90
-show_missing = true

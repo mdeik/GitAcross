@@ -49,15 +49,6 @@ For development, install the local checkout:
 pip install -e .
 ```
 
-### Tests
-
-```bash
-pip install -e .[dev]   # pytest + pytest-cov
-pytest                  # run the test suite
-pytest --cov=gitacross  # run with a coverage floor (90% line + branch)
-ruff check src tests    # lint
-```
-
 ### Config
 
 GitAcross reads a YAML file listing the mirrors you want. Each entry in the `projects` list is a **project**: it has a `source` (where releases come from) and a `target` (where they go).
@@ -83,7 +74,7 @@ gitacross --config config.yml --lint
 gitacross --config config.yml
 ```
 
-Run it again later — releases that were already synced are skipped, so nothing is duplicated. Use `--project-name my-project` to sync a single project. See [CLI](#cli) for all flags, or the [Python API](#python-api) to drive GitAcross from code.
+Run it again later — releases that were already synced are skipped, so nothing is duplicated. Use `--project my-project` to sync a single project. See [CLI](#cli) for all flags, or the [Python API](#python-api) to drive GitAcross from code.
 
 ## How it works
 
@@ -128,13 +119,6 @@ A config file starts with a `projects` list — each entry is one mirror and nee
 
 Tokens use `${VAR}` syntax — resolved from environment variables.
 
-For local **targets**, the `path` does not have to exist yet: if the directory is
-missing or is not already a git repository, GitAcross creates the directory and
-runs `git init` there before committing. If a repository already exists at that
-path it is opened as-is — existing git metadata is never re-initialised or
-overwritten (bare repositories and broken `.git` markers are refused with an
-error). Local **sources** must point at an existing git repository.
-
 | Option | Description |
 |---|---|
 | [`enabled`](#enabled) | Disable a project without deleting it |
@@ -150,19 +134,19 @@ Set to `false` to pause a project without removing it from the config. Default `
 
 #### `preserve_description`
 
-Copy the source release notes/body to the target release. Default `true`. Set at the project or endpoint level; `false` leaves the target release description empty.
+Copy the source release notes/body to the target release. Default `true` (alias: `preserve_release_description`). Set at the project or endpoint level; `false` leaves the target release description empty.
 
 #### `release_description`
 
-Format the target release notes from a template. Placeholders: `{body}`, `{description}`, `{tag}`, `{commit_sha}`, `{short_sha}`, `{project_name}`, `{name}`, `{source_date}`.
+Format the target release notes from a template (aliases: `release_notes_template`, `description_template`). Placeholders: `{body}`, `{description}`, `{tag}`, `{commit_sha}`, `{short_sha}`, `{project_name}`, `{name}`, `{source_date}`.
 
 #### `commit_message`
 
-Custom commit message for the target commits. Default: `"Release {tag}"` or `"Sync commit {short_sha}"`. Placeholders: `{tag}`, `{commit_sha}`, `{short_sha}`, `{project_name}`, `{name}`, `{source_date}`, `{body}`, `{description}`.
+Custom commit message for the target commits (alias: `commit_template`). Default: `"Release {tag}"` or `"Sync commit {short_sha}"`. Placeholders: `{tag}`, `{commit_sha}`, `{short_sha}`, `{project_name}`, `{name}`, `{source_date}`, `{body}`, `{description}`.
 
 #### `sync_assets`
 
-Mirror prebuilt release packages from the source to the target release — so you only need CI on the source platform. Project-level field:
+Mirror prebuilt release packages from the source to the target release — so you only need CI on the source platform (aliases: `preserve_assets`, `include_assets`). Project-level field:
 
 | Value | Behaviour |
 |---|---|
@@ -414,17 +398,16 @@ GitAcross can be driven from the command line or called directly from Python.
 ### CLI
 
 ```
-gitacross --config PATH [--project-name NAME] [--workdir PATH] [--dry-run] [--reset] [--clean-cache] [--lint] [--fix] [-v]
+gitacross --config PATH [--project NAME] [--workdir PATH] [--dry-run] [--reset] [--lint] [--fix] [-v]
 ```
 
 | Flag | Description |
 |---|---|
 | `--config PATH` | Config file to use (required) |
-| `--project-name NAME` | Sync only the project with this name |
+| `--project NAME` | Sync only this project |
 | `--workdir PATH` | Where state and cache live (default: `.gitsync`) |
 | `--dry-run` | Preview changes without committing or pushing |
 | `--reset` | Clear saved state and cache before running (fresh start) |
-| `--clean-cache` | Delete mirror caches no longer referenced by the config (e.g. after changing a repo's host or name in the config) |
 | `--lint` | Check the config for YAML errors, invalid settings, and redundant options |
 | `--fix` | Fix misplaced keys and remove redundant options in the config |
 | `-v, --verbose` | Debug logging |
@@ -456,7 +439,7 @@ for r in results:
 # Preview only — nothing is committed or pushed
 results = gitacross.run(
     "config.yml",
-    project_name="my-project",
+    project="my-project",
     dry_run=True,
     work_dir="/data/custom_dir",
 )
@@ -478,11 +461,11 @@ results = gitacross.run("config.yml", reset=True)
 <summary>Full control — loop over projects yourself</summary>
 
 ```python
-config = gitacross.Config("config.yml")
+config = gitacross.Config.from_path("config.yml")
 
-for project_config in config.projects:
-    if project_config.enabled:
-        gitacross.sync_project(project_config, ".gitsync", dry_run=False)
+for project in config.projects:
+    if project.enabled:
+        gitacross.sync_project(project, ".gitsync", dry_run=False)
 ```
 
 </details>
@@ -492,7 +475,7 @@ for project_config in config.projects:
 
 ```python
 # ${VAR} tokens still resolve from the environment
-project_config = gitacross.ProjectConfig({
+project = gitacross.ProjectConfig({
     "name": "my-project",
     "source": {
         "type": "gitea",
@@ -507,7 +490,7 @@ project_config = gitacross.ProjectConfig({
         "token": "${GITHUB_TOKEN}",
     },
 })
-gitacross.sync_project(project_config, ".gitsync")
+gitacross.sync_project(project, ".gitsync")
 ```
 
 </details>
@@ -524,44 +507,12 @@ if not report.is_valid:
 
 </details>
 
-<details>
-<summary>Sync from YAML held in a variable — no file needed</summary>
-
-```python
-# ${VAR} tokens still resolve from the environment
-config = gitacross.Config.from_yaml_string("""
-projects:
-  - name: my-mirror
-    source:
-      type: gitea
-      repo: owner/repo
-      api: https://gitea.example.com/api/v1
-      token: ${GITEA_TOKEN}
-    target:
-      type: github
-      repo: owner/repo
-      api: https://api.github.com
-      token: ${GITHUB_TOKEN}
-""")
-gitacross.run(config, dry_run=True)
-```
-
-</details>
-
-All public symbols are importable directly from `gitacross`:
-
 | Symbol | What it does |
 |---|---|
-| `run(config, project_name=None, dry_run=False, reset=False, work_dir=".gitsync")` | **Primary entry point.** Sync from a config — a `Config` instance, a path, or an open file object
-| `sync_project(project_config, work_dir=".gitsync", dry_run=False)` | Sync one project's new releases (respects `project_config.enabled`); state and cache live in `work_dir`. Returns dicts with `tag`, `source_commit`, `target_commit`, `source_date` |
-| `lint_config(config, print_output=True)` | Lint a config (path or open file object) → `LintReport` |
-| `fix_config(config, write_back=True, print_output=True)` | Fix misplaced/redundant options (path only — writes back to the file) → `FixReport` |
-| `Config(config_source)` | Load a config from a path or open file object; exposes `.projects`. `Config.from_yaml_string(content)` loads a config from raw YAML text (`str` or `bytes`) — no file or stream needed |
-| `ProjectConfig(raw)` | Build one mirror project from a raw config dict (see the “No config file” example). Fields: `name`, `enabled`, `source`, `target`, `renderer`, `retry`, `preserve_description`, `sync_assets`, `stream_assets`, `commit_message`, `release_description` |
-| `ConfigLinter()` | Collect lint issues programmatically: `lint_file(config)`, `lint_yaml_string(content)`; results accumulate in `.issues` |
-| `ConfigFixer()` | Fix a config programmatically: `fix_yaml_string(content)` → `FixReport`; actions recorded in `.fixes` |
-| `LintIssue(severity, message, project_name=None, key=None)` | One lint finding |
-| `FixIssue(message, project_name=None)` | One applied fix |
-| `LintReport(issues)` | Lint results: `.issues`, `.errors`, `.warnings`, `.redundant`, `.is_valid`, `.format_text()` |
-| `FixReport(fixes, content, is_valid, error=None)` | Fix results: `.fixes`, `.content`, `.is_valid`, `.error`, `.format_text()` |
-| `LintSeverity` | Severity levels used by `LintIssue`: `LintSeverity.ERROR`, `LintSeverity.WARNING`, `LintSeverity.REDUNDANT` |
+| `run(config_path, project=None, dry_run=False, reset=False, work_dir=".gitsync")` | Sync from a config file — the primary entry point. Returns one dict per project: `project`, `synced`, `releases_synced`, `releases`, `error` |
+| `sync_project(project, work_dir=".gitsync", dry_run=False)` | Sync one project's new releases (respects `project.enabled`); state and cache live in `work_dir`. Returns dicts with `tag`, `source_commit`, `target_commit`, `source_date` |
+| `lint_config(config_path, print_output=True)` | Lint a config file → `LintReport` (`.is_valid`, `.errors`) |
+| `fix_config(config_path, write_back=True, print_output=True)` | Fix misplaced/redundant options → `FixReport` |
+| `Config(config_path)` / `Config.from_path(config_path)` | Load a config file; exposes `.projects` |
+| `ProjectConfig` | One mirror: `name`, `enabled`, `source`, `target`, `renderer`, `retry`, `sync_assets`, `stream_assets`, `preserve_description`, `commit_message`, `release_description` |
+| `ConfigLinter`, `ConfigFixer`, `LintIssue`, `FixIssue`, `LintReport`, `FixReport`, `LintSeverity` | Building blocks for programmatic linting and fixing |

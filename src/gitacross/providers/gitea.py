@@ -1,5 +1,4 @@
 """Gitea provider — REST API client for Gitea instances."""
-from __future__ import annotations
 
 import io
 import json
@@ -25,13 +24,7 @@ class _MultipartReader:
     """
 
     def __init__(self, header: bytes, file_path, footer: bytes):
-        # Keep the file handle open for the lifetime of the reader (streaming);
-        # it is closed in close()/__exit__. A context manager would defeat this.
-        self._parts = [
-            io.BytesIO(header),
-            open(file_path, "rb"),  # noqa: SIM115
-            io.BytesIO(footer),
-        ]
+        self._parts = [io.BytesIO(header), open(file_path, "rb"), io.BytesIO(footer)]
         self._idx = 0
 
     def read(self, size=-1):
@@ -55,7 +48,7 @@ class _MultipartReader:
         for part in self._parts:
             try:
                 part.close()
-            except Exception:  # noqa: S110, BLE001 — close() must never raise during cleanup
+            except Exception:
                 pass
 
     def __enter__(self):
@@ -136,8 +129,8 @@ class GiteaClient(BaseAPIClient):
             f"--{boundary}\r\n"
             f'Content-Disposition: form-data; name="attachment"; filename="{name}"\r\n'
             f"Content-Type: application/octet-stream\r\n\r\n"
-        ).encode()
-        footer_bytes = f"\r\n--{boundary}--\r\n".encode()
+        ).encode("utf-8")
+        footer_bytes = f"\r\n--{boundary}--\r\n".encode("utf-8")
 
         req_headers = {
             "Authorization": self._headers["Authorization"],
