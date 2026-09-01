@@ -6,14 +6,20 @@ import yaml
 class State:
     """Persistent state tracking which releases have been synced.
 
-    Releases are keyed by tag name (not API release id) so state stays
-    valid across source modes (`release` vs `tag`). Written atomically
-    (tempfile + rename) after each successful release.
+    State lives in ``state.yml`` inside the work directory (the directory
+    passed to the constructor). Releases are keyed by tag name (not API
+    release id) so state stays valid across source modes (`release` vs
+    `tag`). Written atomically (tempfile + rename) after each successful
+    release.
     """
 
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, work_dir):
+        self.work_dir = Path(work_dir)
+        self.path = self.work_dir / "state.yml"
         self._data = self._load()
+
+    def __repr__(self):
+        return f"State(work_dir={str(self.work_dir)!r})"
 
     def _load(self):
         if self.path.exists():
@@ -60,7 +66,7 @@ class State:
         self._data["projects"][project_name]["releases"][str(tag_name)] = data
 
     def save(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         with open(tmp, "w") as f:
             yaml.dump(self._data, f, default_flow_style=False)

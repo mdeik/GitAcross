@@ -52,6 +52,13 @@ class LintReport:
     def is_valid(self) -> bool:
         return len(self.errors) == 0
 
+    def __repr__(self):
+        return (
+            f"LintReport(is_valid={self.is_valid}, "
+            f"errors={len(self.errors)}, warnings={len(self.warnings)}, "
+            f"redundant={len(self.redundant)})"
+        )
+
     def format_text(self) -> str:
         out = []
         # Group issues by project (None first)
@@ -88,6 +95,11 @@ _VALID_PROJECT_KEYS = {
     "preserve_assets",
     "include_assets",
     "stream_assets",
+    "commit_message",
+    "commit_template",
+    "release_description",
+    "release_notes_template",
+    "description_template",
 }
 
 _KNOWN_SOURCE_KEYS = {
@@ -143,6 +155,9 @@ class ConfigLinter:
     def __init__(self):
         self.issues: List[LintIssue] = []
 
+    def __repr__(self):
+        return f"ConfigLinter(issues={len(self.issues)})"
+
     def _add(
         self,
         severity: LintSeverity,
@@ -154,8 +169,8 @@ class ConfigLinter:
             LintIssue(severity=severity, message=message, project=project, key=key)
         )
 
-    def lint_file(self, file_path: Union[str, Path]) -> LintReport:
-        path = Path(file_path)
+    def lint_file(self, config_path: Union[str, Path]) -> LintReport:
+        path = Path(config_path)
         if not path.exists():
             self._add(LintSeverity.ERROR, f"File not found: {path}")
             return LintReport(self.issues)
@@ -341,6 +356,28 @@ class ConfigLinter:
                     "'stream_assets: false' is redundant (default is false).",
                     project=p_name,
                 )
+
+        for key in ("commit_message", "commit_template"):
+            if key in p:
+                val = p[key]
+                if not isinstance(val, str):
+                    self._add(
+                        LintSeverity.ERROR,
+                        f"'{key}' must be a string (got {type(val).__name__}).",
+                        project=p_name,
+                        key=key,
+                    )
+
+        for key in ("release_description", "release_notes_template", "description_template"):
+            if key in p:
+                val = p[key]
+                if not isinstance(val, str):
+                    self._add(
+                        LintSeverity.ERROR,
+                        f"'{key}' must be a string (got {type(val).__name__}).",
+                        project=p_name,
+                        key=key,
+                    )
 
         # 3. Source endpoint checks
         source = p.get("source")
@@ -740,6 +777,8 @@ class ConfigLinter:
                                 "Replace operation item requires 'search' and 'replace'.",
                                 project=p_name,
                             )
+                        if not isinstance(item, dict):
+                            continue
                         pat = item.get("pattern")
                         if pat == "literal":
                             self._add(
@@ -753,6 +792,25 @@ class ConfigLinter:
                                 f"Invalid replace pattern mode '{pat}'. Expected 'literal' or 'regex'.",
                                 project=p_name,
                             )
+                        if item.get("case_sensitive") is True:
+                            self._add(
+                                LintSeverity.REDUNDANT,
+                                "'case_sensitive: true' in replace operation is redundant (default is true).",
+                                project=p_name,
+                            )
+                        if item.get("match_case") is False:
+                            self._add(
+                                LintSeverity.REDUNDANT,
+                                "'match_case: false' in replace operation is redundant (default is false).",
+                                project=p_name,
+                            )
+                        for key in ("case_sensitive", "match_case"):
+                            if key in item and not isinstance(item[key], bool):
+                                self._add(
+                                    LintSeverity.ERROR,
+                                    f"Replace option '{key}' must be a boolean (true/false).",
+                                    project=p_name,
+                                )
 
                 elif op_type == "add":
                     for item in items:
@@ -781,6 +839,8 @@ class ConfigLinter:
                                 "Validate operation item requires 'path'.",
                                 project=p_name,
                             )
+                        if not isinstance(item, dict):
+                            continue
                         asrt = item.get("assert")
                         if asrt not in valid_asserts:
                             self._add(
@@ -796,14 +856,36 @@ class ConfigLinter:
                                 f"Validate assert '{asrt}' requires 'pattern'.",
                                 project=p_name,
                             )
+                        if item.get("case_sensitive") is True:
+                            self._add(
+                                LintSeverity.REDUNDANT,
+                                "'case_sensitive: true' in validate operation is redundant (default is true).",
+                                project=p_name,
+                            )
+                        if "case_sensitive" in item and not isinstance(
+                            item["case_sensitive"], bool
+                        ):
+                            self._add(
+                                LintSeverity.ERROR,
+                                "Validate option 'case_sensitive' must be a boolean (true/false).",
+                                project=p_name,
+                            )
+                        if asrt not in ("string_exists", "string_absent") and (
+                            "case_sensitive" in item
+                        ):
+                            self._add(
+                                LintSeverity.WARNING,
+                                f"'case_sensitive' only applies to string_exists/string_absent (ignored for '{asrt}').",
+                                project=p_name,
+                            )
 
 
 def lint_config(
-    file_path: Union[str, Path], print_output: bool = True
+    config_path: Union[str, Path], print_output: bool = True
 ) -> LintReport:
     """Lint a config file and optionally print the results."""
     linter = ConfigLinter()
-    report = linter.lint_file(file_path)
+    report = linter.lint_file(config_path)
     if print_output:
         print(report.format_text())
     return report
@@ -868,10 +950,19 @@ class FixReport:
 
         return "\n".join(out)
 
+    def __repr__(self) -> str:
+        return (
+            f"FixReport(is_valid={self.is_valid}, fixes={len(self.fixes)}, "
+            f"error={self.error!r})"
+        )
+
 
 class ConfigFixer:
     def __init__(self):
         self.fixes: List[FixIssue] = []
+
+    def __repr__(self):
+        return f"ConfigFixer(fixes={len(self.fixes)})"
 
     def _add(self, message: str, project: Optional[str] = None):
         self.fixes.append(FixIssue(message=message, project=project))
@@ -1068,24 +1159,44 @@ class ConfigFixer:
                     for op_type, items in op.items():
                         if isinstance(items, list):
                             for item in items:
-                                if (
-                                    isinstance(item, dict)
-                                    and item.get("pattern") == "literal"
-                                ):
+                                if not isinstance(item, dict):
+                                    continue
+                                if item.get("pattern") == "literal":
                                     del item["pattern"]
                                     self._add(
                                         f"Removed redundant 'pattern: literal' in {op_type} operation",
                                         project=p_name,
                                     )
+                                if op_type == "replace":
+                                    if item.get("case_sensitive") is True:
+                                        del item["case_sensitive"]
+                                        self._add(
+                                            f"Removed redundant 'case_sensitive: true' in replace operation",
+                                            project=p_name,
+                                        )
+                                    if item.get("match_case") is False:
+                                        del item["match_case"]
+                                        self._add(
+                                            f"Removed redundant 'match_case: false' in replace operation",
+                                            project=p_name,
+                                        )
+                                if op_type == "validate" and item.get(
+                                    "case_sensitive"
+                                ) is True:
+                                    del item["case_sensitive"]
+                                    self._add(
+                                        f"Removed redundant 'case_sensitive: true' in validate operation",
+                                        project=p_name,
+                                    )
 
 
 def fix_config(
-    file_path: Union[str, Path],
+    config_path: Union[str, Path],
     write_back: bool = True,
     print_output: bool = True,
 ) -> FixReport:
     """Fix misplaced and redundant options in config file."""
-    path = Path(file_path)
+    path = Path(config_path)
     if not path.exists():
         report = FixReport(
             fixes=[], content="", is_valid=False, error=f"File not found: {path}"

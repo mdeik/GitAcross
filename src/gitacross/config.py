@@ -18,6 +18,11 @@ _VALID_PROJECT_KEYS = {
     "preserve_assets",
     "include_assets",
     "stream_assets",
+    "commit_message",
+    "commit_template",
+    "release_description",
+    "release_notes_template",
+    "description_template",
 }
 
 _KNOWN_SOURCE_KEYS = {
@@ -37,19 +42,22 @@ _KNOWN_ENDPOINT_KEYS = {
 
 
 class Config:
-    def __init__(self, path):
-        with open(path) as f:
+    def __init__(self, config_path):
+        with open(config_path) as f:
             raw = yaml.safe_load(f)
         if isinstance(raw, list):
             # Flat list at top level: [ {name:..., source:..., ...} ]
             raw = {"projects": raw}
         elif raw is None:
             raw = {"projects": []}
-        self.projects = [ProjectConfig(p) for p in raw.get("projects", [])]
+        self.projects = [ProjectConfig(p) for p in (raw.get("projects") or [])]
 
     @classmethod
-    def from_path(cls, path):
-        return cls(path)
+    def from_path(cls, config_path):
+        return cls(config_path)
+
+    def __repr__(self):
+        return f"Config(projects={len(self.projects)})"
 
 
 class _EndpointConfig:
@@ -110,7 +118,14 @@ class _EndpointConfig:
 
 class ProjectConfig:
     def __init__(self, raw):
-        self.name = raw["name"]
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Project entry must be a map/dict (got {type(raw).__name__})"
+            )
+        name = raw.get("name")
+        if not name:
+            raise ValueError("Project is missing a required 'name'")
+        self.name = name
         self.enabled = bool(raw.get("enabled", True))
         raw_source = raw.get("source", {})
         raw_target = raw.get("target", {})
@@ -167,6 +182,24 @@ class ProjectConfig:
         # When True, asset uploads stream from disk instead of buffering in RAM.
         # Default is False (RAM) to preserve existing behaviour.
         self.stream_assets = bool(raw.get("stream_assets", False))
+
+        # commit_message — project-level commit message template (e.g. "chore(sync): {tag}")
+        self.commit_message = raw.get("commit_message") or raw.get("commit_template") or None
+
+        # release_description — project-level release description template
+        self.release_description = (
+            raw.get("release_description")
+            or raw.get("release_notes_template")
+            or raw.get("description_template")
+            or None
+        )
+
+    def __repr__(self):
+        return (
+            f"ProjectConfig(name={self.name!r}, "
+            f"source={self.source.type} -> target={self.target.type}, "
+            f"enabled={self.enabled})"
+        )
 
 
 class _AuthorConfig:

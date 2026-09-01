@@ -22,6 +22,8 @@ projects:
       branch: main
 
     # preserve_description: true # optional: preserve release notes/description on target release (default: true)
+    # release_description: "Upstream release {tag}:\n\n{body}" # optional: customize target release notes template
+    # commit_message: "chore(sync): release {tag} ({short_sha})" # optional: customize target commit message template
     # sync_assets: true          # optional: copy all release assets/packages to the target
     # sync_assets: "*.tar.gz"    # optional: only copy assets matching a glob pattern
     # sync_assets:               # optional: only copy assets matching any of these patterns
@@ -58,6 +60,14 @@ projects:
               replace: github.com
               pattern: literal
               glob: "*.yml"
+            # Match any casing (Gitea, GITEA, ...) and adapt the
+            # replacement to the casing of each match:
+            # gitea -> github, Gitea -> Github, GITEA -> GITHUB
+            - search: gitea
+              replace: github
+              case_sensitive: false
+              match_case: true
+              glob: "*.md"
         - replace:
             # Second block runs after the first — files are re-read per item,
             # so later searches see the output of earlier replacements.

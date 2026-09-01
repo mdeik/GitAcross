@@ -1,78 +1,152 @@
 # GitAcross
 
-[![CI](https://github.com/mdeik/GitAcross/actions/workflows/test.yml/badge.svg)](https://github.com/mdeik/GitAcross/actions)
-
-Mirror releases between git hosts (Gitea, GitHub, local). One commit per release, linear history, with file transforms.
+**Mirror releases between git hosts.** When a new release appears on one host, GitAcross copies it to another — one clean commit per release, with the option to remove or rewrite files along the way.
 
 ```
-local repo  ──→  GitHub       (publish local tags as releases)
-Gitea       ──→  GitHub       (mirror dev to public)
-GitHub      ──→  local repo   (backup)
-...any combo                    (gitea, github, local)
+local repo  ──>  GitHub       (publish local tags as releases)
+Gitea       ──>  GitHub       (mirror dev to public)
+GitHub      ──>  local repo   (backup)
+...any combo                  (gitea, github, local)
 ```
+
+**Highlights:**
+
+- **Clean history** — every release lands as one commit on top of the last, so the target branch stays linear and readable
+- **Safe to re-run** — already-synced releases are skipped, so it works on a schedule or in CI
+- **File transforms** — exclude files or rewrite their contents before publishing
+- **Flexible endpoints** — Gitea, GitHub, and local repositories, in any combination
+- **Config guardrails** — lint and auto-fix your config before it runs
+
+## Contents
+
+- [Quick start](#quick-start)
+  - [Install](#install)
+  - [Config](#config)
+  - [Run](#run)
+- [How it works](#how-it-works)
+- [Reference](#reference)
+  - [Project anatomy](#project-anatomy)
+  - [Endpoints — source & target](#endpoints--source--target)
+  - [Source mode: release, tag, or commit](#source-mode-release-tag-or-commit)
+  - [Excluding files](#excluding-files)
+  - [Transforming files](#transforming-files)
+  - [Retries](#retries)
+- [How to use](#how-to-use)
+  - [CLI](#cli)
+  - [Python API](#python-api)
 
 ## Quick start
 
 ### Install
 
-Install from PyPI:
-
 ```bash
 pip install gitacross
-````
+```
 
-For development, install the local checkout in editable mode:
+For development, install the local checkout:
 
 ```bash
 pip install -e .
 ```
 
+### Config
+
+GitAcross reads a YAML file listing the mirrors you want. Each entry in the `projects` list is a **project**: it has a `source` (where releases come from) and a `target` (where they go).
+
+Start from the fully commented [config.yml.example](config.yml.example) — it covers remote-to-remote mirrors, prebuilt asset sync, local repos, backups, and commit-mode branch syncing:
+
+```bash
+cp config.yml.example config.yml
+```
+
+Then edit `config.yml` to fill in your own repos and tokens. Tokens like `${GITEA_TOKEN}` are read from environment variables — keep secrets out of the file. See [Project anatomy](#project-anatomy) for everything else a project can have.
 
 ### Run
 
 ```bash
-# Lint configuration for errors, invalid keys, and redundant defaults
-gitacross --config config.yml --lint
-
-# Automatically fix misplaced keys and remove redundant default options
-gitacross --config config.yml --fix
-
-# Preview changes without modifying targets
+# Preview what would change (no commits, no pushes)
 gitacross --config config.yml --dry-run
 
-# Run full sync
+# Check the config for errors and redundant settings
+gitacross --config config.yml --lint
+
+# Do the sync
 gitacross --config config.yml
-
-# Sync only a specific project
-gitacross --config config.yml --project my-project
-
-# Or run directly from repository root
-python main.py --config config.yml --lint
-python main.py --config config.yml --fix
-python main.py --config config.yml
-
-# Or run as a Python module
-python -m gitacross --config config.yml --lint
-python -m gitacross --config config.yml --fix
-python -m gitacross --config config.yml
 ```
+
+Run it again later — releases that were already synced are skipped, so nothing is duplicated. Use `--project my-project` to sync a single project. See [CLI](#cli) for all flags, or the [Python API](#python-api) to drive GitAcross from code.
+
+## How it works
+
+For each project, GitAcross watches the **source** and mirrors new releases to the **target**:
+
+1. Fetch the list of releases from the source
+2. Skip releases that were already synced (remembered in a local state file)
+3. For each new release, oldest first:
+   - Check out the release's file tree
+   - Remove excluded files, then apply any file transforms
+   - Commit the result on the target's branch — one commit per release
+   - Tag the commit and publish the release on the target
+4. Save the sync state
+
+On remote targets the commit is pushed; on local targets the working tree is updated instead. Re-running the same command later only syncs new releases — already-synced ones are skipped.
 
 ## Reference
 
-### Endpoints
+### Project anatomy
+
+A config file starts with a `projects` list — each entry is one mirror and needs a `name`, a `source`, and a `target`; everything else is optional.
+
+| Key | What it does | More |
+|---|---|---|
+| `name` | Unique name for the project | — |
+| `source` | Where releases come from | [Endpoints](#endpoints--source--target) |
+| `target` | Where releases are mirrored to | [Endpoints](#endpoints--source--target) |
+| `enabled` | `false` pauses the project without deleting it | [Endpoints](#endpoints--source--target) |
+| `renderer` | File handling: `ignore` (exclude), `operations` (transform), `author` (commit identity) | [Excluding files](#excluding-files) · [Transforming files](#transforming-files) |
+| `retry` | Retry settings for API calls | [Retries](#retries) |
+| `sync_assets`, `stream_assets` | Mirror prebuilt release files to the target | [Endpoints](#endpoints--source--target) |
+| `preserve_description`, `release_description`, `commit_message` | Release notes and commit messages | [Endpoints](#endpoints--source--target) |
+
+### Endpoints — source & target
+
+`source` and `target` each describe one git host:
 
 | Type | `source` fields | `target` fields |
 |---|---|---|
 | **gitea** / **github** | `repo`, `api`, `token`<br>`mode` (default `release`, or `tag`, or `commit`)<br>`include_prereleases` (default false)<br>`include_drafts` (default false) | `repo`, `api`, `token`<br>`branch` (default main) |
 | **local** | `path`, `tag_pattern` (default `*`) | `path`, `branch` (default main) |
 
-Tokens use `${VAR}` syntax — resolved from environment.
+Tokens use `${VAR}` syntax — resolved from environment variables.
 
-`enabled` (default `true`) can be set to `false` on any project to temporarily disable or skip it without removing it from your configuration file.
+| Option | Description |
+|---|---|
+| [`enabled`](#enabled) | Disable a project without deleting it |
+| [`preserve_description`](#preserve_description) | Copy source release notes to the target release |
+| [`release_description`](#release_description) | Format target release notes from a template |
+| [`commit_message`](#commit_message) | Override target commit messages |
+| [`sync_assets`](#sync_assets) | Mirror prebuilt release assets to the target |
+| [`stream_assets`](#stream_assets) | Stream asset uploads from disk (low memory) |
 
-`preserve_description` (default `true`, alias `preserve_release_description`) can be set at the project or endpoint level to preserve the source release notes/body on the target release, or set to `false` to leave the target release description empty.
+#### `enabled`
 
-`sync_assets` (alias `preserve_assets`, `include_assets`) is a **project-level** field that mirrors prebuilt release packages from the source to the target release — so you only need CI on the source platform:
+Set to `false` to pause a project without removing it from the config. Default `true`.
+
+#### `preserve_description`
+
+Copy the source release notes/body to the target release. Default `true` (alias: `preserve_release_description`). Set at the project or endpoint level; `false` leaves the target release description empty.
+
+#### `release_description`
+
+Format the target release notes from a template (aliases: `release_notes_template`, `description_template`). Placeholders: `{body}`, `{description}`, `{tag}`, `{commit_sha}`, `{short_sha}`, `{project_name}`, `{name}`, `{source_date}`.
+
+#### `commit_message`
+
+Custom commit message for the target commits (alias: `commit_template`). Default: `"Release {tag}"` or `"Sync commit {short_sha}"`. Placeholders: `{tag}`, `{commit_sha}`, `{short_sha}`, `{project_name}`, `{name}`, `{source_date}`, `{body}`, `{description}`.
+
+#### `sync_assets`
+
+Mirror prebuilt release packages from the source to the target release — so you only need CI on the source platform (aliases: `preserve_assets`, `include_assets`). Project-level field:
 
 | Value | Behaviour |
 |---|---|
@@ -81,28 +155,48 @@ Tokens use `${VAR}` syntax — resolved from environment.
 | `"*.tar.gz"` | Only assets matching the glob |
 | `["*.tar.gz", "*.zip"]` | Only assets matching any listed glob |
 
-`stream_assets: true` pairs with `sync_assets` to stream each asset upload from disk rather than buffering the full file in RAM. Default is `false`. Set to `true` when syncing large prebuilt binaries (hundreds of MB) to avoid out-of-memory errors.
-
 ```yaml
-- name: my-project
-  sync_assets:            # build on Gitea, upload prebuilts to GitHub
-    - "*.tar.gz"
-    - "*.zip"
-    - "*.deb"
-    - "*-checksums.txt"
-  stream_assets: true     # stream uploads from disk — avoids buffering in RAM
-  source:
-    type: gitea
-    ...
-  target:
-    type: github
-    ...
+projects:
+  - name: my-project
+    sync_assets:            # build on Gitea, upload prebuilts to GitHub
+      - "*.tar.gz"
+      - "*.zip"
+      - "*.deb"
+      - "*-checksums.txt"
+    stream_assets: true     # stream uploads from disk — avoids buffering in RAM
+    source:
+      type: gitea
+      ...
+    target:
+      type: github
+      ...
 ```
 
+#### `stream_assets`
 
-### `source.mode` — release vs tag vs commit
+Stream each asset upload directly from the temporary download directory on disk (cleaned up after syncing) instead of buffering the whole file in memory. Default `false`; set to `true` when syncing large prebuilt binaries (hundreds of MB) to avoid out-of-memory errors.
 
-Remote sources sync from the host's **API releases** by default (`mode: release`): prerelease/draft filtering applies, and `sync_from` must be an API release. Set `mode: tag` to treat **git tags** as releases instead — useful when tags were pushed without creating release objects:
+### Source mode: release, tag, or commit
+
+Remote sources sync from the host's **API releases** by default. Two alternatives are available: git tags, or the latest commit of a branch. A `sync_from` key on the source sets the starting point — only releases from that tag onward are synced.
+
+Synced state is keyed by **tag name**, so switching a repo between `release` and `tag` modes is safe: already-synced tags are skipped regardless of the current mode (older state files keyed by API release id are migrated automatically).
+
+| Mode | What gets synced | When to use |
+|---|---|---|
+| [`release`](#release--api-releases-default) (default) | API releases, with prerelease/draft filtering | Normal release workflow |
+| [`tag`](#tag--git-tags) | Git tags (no release objects needed) | Tags pushed without releases |
+| [`commit`](#commit--sync-latest-head) | Latest commit of the source branch | Keep the target permanently in sync |
+
+#### `release` — API releases (default)
+
+Remote sources sync from the host's **API releases** by default: prerelease/draft filtering applies, and `sync_from` must be an API release.
+
+In `release` mode, a `sync_from` tag that exists only in git (no release object) — or is filtered out as prerelease/draft — produces a warning and syncs nothing. That points you at the right option, `mode: tag` or `include_prereleases`/`include_drafts`, instead of silently treating tags as releases.
+
+#### `tag` — git tags
+
+Set `mode: tag` to treat **git tags** as releases instead — useful when tags were pushed without creating release objects. `sync_from: v2.0.0` starts at that tag, skipping older ones:
 
 ```yaml
 source:
@@ -114,11 +208,7 @@ source:
   sync_from: v2.0.0
 ```
 
-In `release` mode, a `sync_from` tag that exists only in git (no release object) or is filtered out as prerelease/draft produces a warning and syncs nothing, pointing you at the right option — `mode: tag` or `include_prereleases`/`include_drafts` — instead of silently treating tags as releases.
-
-Synced state is keyed by **tag name**, so switching a repo between `release` and `tag` modes is safe: already-synced tags are skipped regardless of the current mode (older state files keyed by API release id are migrated automatically).
-
-#### `mode: commit` — sync latest HEAD instead of releases
+#### `commit` — sync latest HEAD
 
 Set `mode: commit` to sync the **current HEAD of the source branch** each time the script runs, rather than iterating over releases or tags. No tag or release is created on the target — only a plain commit is pushed.
 
@@ -141,42 +231,49 @@ source:
 | **Idempotent** | Re-running with same HEAD is a no-op (same SHA already in state) |
 | **State purged** | Re-commits current HEAD snapshot; git sees no diff if nothing changed → no-op commit |
 
-### `renderer.ignore`
+### Excluding files
 
-A list of glob patterns. Matched paths are removed before any operations run.
+Some files shouldn't be mirrored at all. The project's `renderer` block accepts an `ignore` list of glob patterns — matched paths are removed from every release before anything else runs:
+
+```yaml
+renderer:
+  ignore:
+    - node_modules                 # any node_modules/ dir, at any depth
+    - "*.secret"                   # only in root (single *, no /)
+    - "build/**/*.o"               # any .o file under any build/ dir
+    - ToDo.md                      # any file named ToDo.md, at any depth
+    - some_folder/node_modules     # node_modules only when inside some_folder/
+    - "./some_folder/node_modules"  # root-only variant (anchored to ./)
+```
 
 | Wildcard | Meaning |
 |---|---|
-| `*` | Matches within a single path segment (does **not** cross `/`) |
-| `**` | Matches across any number of directory levels (recursive) |
+| `*` | Within a single path segment (does **not** cross `/`) |
+| `**` | Across any number of directory levels (recursive) |
 
-So `.git/*` would only match direct children like `.git/config`, but miss `.git/refs/heads/main`. Use `.git/**` to delete everything inside. Also, matching the directory name directly (`node_modules`) will remove the whole tree in one shot via `shutil.rmtree`, which is slightly faster than matching each file individually with `node_modules/**`.
+Two shortcuts worth knowing:
 
-```yaml
-ignore:
-  - node_modules                 # any node_modules/ dir, at any depth
-  - "*.secret"                  # only in root (single *, no /)
-  - "build/**/*.o"              # any .o file under any build/ dir
-  - ToDo.md                      # any file named ToDo.md, at any depth
-  - some_folder/node_modules     # node_modules only when inside some_folder/
-  - "./some_folder/node_modules"  # root-only variant (anchored to ./)
-```
+- `.git/*` matches only direct children like `.git/config` and misses deeper files such as `.git/refs/heads/main` — use `.git/**` to delete everything inside.
+- Naming a directory directly (`node_modules`) removes the whole tree in one shot, which is slightly faster than listing `node_modules/**`.
 
-### `renderer.operations`
+### Transforming files
 
-All operations run top-to-bottom in the order they're listed. This applies at every level:
+The project's `renderer` block also accepts an `operations` list of file transformations. They run top-to-bottom in the order listed, both across blocks and within them — a later step can rely on an earlier one (e.g. `rename` a file, then `replace` text inside it).
 
-- **Operation blocks** run in order (e.g. `remove` before `replace` before `add`)
-- **Items inside each block** also run in order (e.g. second `replace` item runs after the first)
-
-This matters when later steps depend on earlier ones — for example, a `rename` moving a file, then a `replace` modifying the renamed target.
+| Operation | What it does |
+|---|---|
+| [`remove`](#remove) | Delete files or paths |
+| [`rename`](#rename) | Move or rename a file |
+| [`replace`](#replace) | Find-and-replace text in files |
+| [`add`](#add) | Create new files (parent dirs auto-created) |
+| [`validate`](#validate) | Assert file/string conditions, abort on failure |
 
 #### `remove`
 
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `path` | yes | — | Path or pattern to remove |
-| `pattern` | no | `literal` | `literal`, `glob`, or `regex` |
+| `pattern` | no | `literal` | How to match: `literal`, `glob`, or `regex` |
 
 ```yaml
 - remove:
@@ -211,8 +308,22 @@ This matters when later steps depend on earlier ones — for example, a `rename`
 | `pattern` | no | `literal` | `literal` or `regex` |
 | `glob` | no | all files | Only modify files matching this glob |
 | `path` | no | — | Only modify this exact relative file path (takes precedence over `glob`) |
+| `case_sensitive` | no | `true` | `false` matches any casing |
+| `match_case` | no | `false` | `true` adapts each replacement to the casing it matched (see below) |
 
 Only UTF-8 text files are scanned. Binary files are skipped.
+
+`case_sensitive: false` makes the search case-insensitive — `search: gitea` also matches `Gitea` and `GITEA` (combines with `pattern: regex` too).
+
+`match_case: true` (handy with `case_sensitive: false`) adjusts each replacement to the casing of the matched text instead of writing it verbatim. With `search: gitea`, `replace: github`:
+
+| Matched text | Replacement |
+|---|---|
+| `gitea` | `github` |
+| `Gitea` | `Github` |
+| `GITEA` | `GITHUB` |
+
+In `regex` mode, backreferences (e.g. `\1`) are expanded before the casing adaptation is applied.
 
 ```yaml
 - replace:
@@ -223,6 +334,10 @@ Only UTF-8 text files are scanned. Binary files are skipped.
     - search: http://old-url.com
       replace: https://new-url.com
       pattern: literal
+    - search: gitea
+      replace: github
+      case_sensitive: false
+      match_case: true
 ```
 
 #### `add`
@@ -250,6 +365,7 @@ Only UTF-8 text files are scanned. Binary files are skipped.
 | `assert` | yes | `file_exists`, `file_absent`, `string_exists`, `string_absent` |
 | `path` | yes | File path to check |
 | `pattern` | for string checks | Text to search for |
+| `case_sensitive` | no (default `true`) | `false` makes `string_exists`/`string_absent` match any casing |
 
 Aborts the entire release if any assertion fails.
 
@@ -262,40 +378,141 @@ Aborts the entire release if any assertion fails.
       pattern: "Gitea"
     - assert: string_exists
       path: README.md
-      pattern: "MIT"
+      pattern: "mit"
+      case_sensitive: false
 ```
 
-### `retry`
+### Retries
+
+Retry settings for API calls, configured in the project's `retry` block.
 
 | Field | Default | Description |
 |---|---|---|
 | `max_attempts` | 3 | Number of retries before giving up |
 | `backoff_seconds` | 2 | Base delay (doubles each attempt) |
 
+## How to use
+
+GitAcross can be driven from the command line or called directly from Python.
+
 ### CLI
 
 ```
-python -m sync.main --config PATH [--project NAME] [--dry-run] [-v]
+gitacross --config PATH [--project NAME] [--workdir PATH] [--dry-run] [--reset] [--lint] [--fix] [-v]
 ```
 
 | Flag | Description |
 |---|---|
-| `--config` | Path to config file (required) |
-| `--project` | Sync only one project (by name) |
+| `--config PATH` | Config file to use (required) |
+| `--project NAME` | Sync only this project |
+| `--workdir PATH` | Where state and cache live (default: `.gitsync`) |
 | `--dry-run` | Preview changes without committing or pushing |
-| `-v` | Debug logging |
+| `--reset` | Clear saved state and cache before running (fresh start) |
+| `--lint` | Check the config for YAML errors, invalid settings, and redundant options |
+| `--fix` | Fix misplaced keys and remove redundant options in the config |
+| `-v, --verbose` | Debug logging |
 
-## How it works
+### Python API
 
-1. Fetch releases from source (paginated API or local tags)
-2. Filter out already-synced releases (tracked in `.gitsync/state.yml`)
-3. For each new release (oldest first):
-   - Export tag's file tree via `git archive`
-   - Apply `ignore` patterns, then `operations` in order
-   - Commit on top of target branch (linear history)
-   - Create annotated tag
-   - Push (remote targets) or populate working tree (local targets)
-   - Create release via API (remote targets)
-4. Persist state atomically
+Prefer code over the CLI? GitAcross is importable from Python — handy for CI scripts and webhooks. Expand the use case that fits your situation:
 
-Re-running is idempotent — already-synced releases are skipped.
+<details>
+<summary>Sync everything — one call</summary>
+
+```python
+import gitacross
+
+results = gitacross.run("config.yml")
+
+for r in results:
+    print(f"{r['project']}: synced={r['synced']} releases={r['releases_synced']}")
+    if r["error"]:
+        print(f"  error: {r['error']}")
+```
+
+</details>
+
+<details>
+<summary>Sync one project, preview first</summary>
+
+```python
+# Preview only — nothing is committed or pushed
+results = gitacross.run(
+    "config.yml",
+    project="my-project",
+    dry_run=True,
+    work_dir="/data/custom_dir",
+)
+```
+
+</details>
+
+<details>
+<summary>Start fresh — ignore saved state</summary>
+
+```python
+# Clears saved state and cache, so every release is treated as new
+results = gitacross.run("config.yml", reset=True)
+```
+
+</details>
+
+<details>
+<summary>Full control — loop over projects yourself</summary>
+
+```python
+config = gitacross.Config.from_path("config.yml")
+
+for project in config.projects:
+    if project.enabled:
+        gitacross.sync_project(project, ".gitsync", dry_run=False)
+```
+
+</details>
+
+<details>
+<summary>No config file — build a project inline</summary>
+
+```python
+# ${VAR} tokens still resolve from the environment
+project = gitacross.ProjectConfig({
+    "name": "my-project",
+    "source": {
+        "type": "gitea",
+        "repo": "owner/repo",
+        "api": "https://gitea.example.com/api/v1",
+        "token": "${GITEA_TOKEN}",
+    },
+    "target": {
+        "type": "github",
+        "repo": "owner/repo",
+        "api": "https://api.github.com",
+        "token": "${GITHUB_TOKEN}",
+    },
+})
+gitacross.sync_project(project, ".gitsync")
+```
+
+</details>
+
+<details>
+<summary>Lint and auto-fix the config from code</summary>
+
+```python
+report = gitacross.lint_config("config.yml", print_output=False)
+if not report.is_valid:
+    print([e.message for e in report.errors])
+    gitacross.fix_config("config.yml", write_back=True)
+```
+
+</details>
+
+| Symbol | What it does |
+|---|---|
+| `run(config_path, project=None, dry_run=False, reset=False, work_dir=".gitsync")` | Sync from a config file — the primary entry point. Returns one dict per project: `project`, `synced`, `releases_synced`, `releases`, `error` |
+| `sync_project(project, work_dir=".gitsync", dry_run=False)` | Sync one project's new releases (respects `project.enabled`); state and cache live in `work_dir`. Returns dicts with `tag`, `source_commit`, `target_commit`, `source_date` |
+| `lint_config(config_path, print_output=True)` | Lint a config file → `LintReport` (`.is_valid`, `.errors`) |
+| `fix_config(config_path, write_back=True, print_output=True)` | Fix misplaced/redundant options → `FixReport` |
+| `Config(config_path)` / `Config.from_path(config_path)` | Load a config file; exposes `.projects` |
+| `ProjectConfig` | One mirror: `name`, `enabled`, `source`, `target`, `renderer`, `retry`, `sync_assets`, `stream_assets`, `preserve_description`, `commit_message`, `release_description` |
+| `ConfigLinter`, `ConfigFixer`, `LintIssue`, `FixIssue`, `LintReport`, `FixReport`, `LintSeverity` | Building blocks for programmatic linting and fixing |

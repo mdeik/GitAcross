@@ -113,12 +113,15 @@ def _op_rename(work, ops):
 def _op_replace(work, ops):
     """Search-and-replace in UTF-8 text files.
 
-    Each op: {search: str, replace: str, pattern?: literal|regex, glob?: str, path?: str}
+    Each op: {search: str, replace: str, pattern?: literal|regex, glob?: str, path?: str,
+              case_sensitive?: bool (default true), match_case?: bool (default false)}
     """
     for op in ops:
         search = op["search"]
         replace = op["replace"]
         mode = op.get("pattern", "literal")
+        case_sensitive = bool(op.get("case_sensitive", True))
+        match_case = bool(op.get("match_case", False))
         path_filter = op.get("path")
         glob_filter = op.get("glob")
 
@@ -136,13 +139,57 @@ def _op_replace(work, ops):
             except (UnicodeDecodeError, ValueError):
                 continue
 
-            new_text = (
-                re.sub(search, replace, text)
-                if mode == "regex"
-                else text.replace(search, replace)
+            new_text = _apply_replace(
+                text, search, replace, mode, case_sensitive, match_case
             )
             if new_text != text:
                 f.write_text(new_text, encoding="utf-8")
+
+
+def _apply_replace(text, search, replace, mode, case_sensitive, match_case):
+    """Apply a single replace rule to *text*.
+
+    *case_sensitive* controls whether the search is case-sensitive
+    (default true). *match_case* adapts each replacement to the casing of
+    the text it matched (default false), e.g. with `search: gitea` and
+    `replace: github`: `gitea -> github`, `Gitea -> Github`, `GITEA -> GITHUB`.
+    """
+    if mode == "regex":
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if match_case:
+            return re.sub(
+                search,
+                lambda m: _match_case(m.group(0), m.expand(replace)),
+                text,
+                flags=flags,
+            )
+        return re.sub(search, replace, text, flags=flags)
+
+    # literal
+    if case_sensitive and not match_case:
+        return text.replace(search, replace)
+
+    flags = 0 if case_sensitive else re.IGNORECASE
+    pattern = re.compile(re.escape(search), flags)
+    if match_case:
+        return pattern.sub(lambda m: _match_case(m.group(0), replace), text)
+    # lambda keeps the replacement literal — re.sub would otherwise
+    # interpret backreferences (e.g. r"\1") in the replacement string.
+    return pattern.sub(lambda m: replace, text)
+
+
+def _match_case(matched, replacement):
+    """Adapt *replacement* to the casing pattern of the matched text.
+
+    - ALL CAPS match   -> replacement uppercased
+    - Capitalized match -> replacement with first letter uppercased
+    - otherwise (lowercase / mixed) -> replacement unchanged
+    """
+    if matched.isupper():
+        return replacement.upper()
+    if matched[:1].isupper():
+        return replacement[:1].upper() + replacement[1:]
+    return replacement
 
 
 def _op_add(work, ops):
@@ -163,11 +210,15 @@ def _op_add(work, ops):
 
 
 def _op_validate(work, ops):
-    """Assert conditions on the final tree. Aborts on failure."""
+    """Assert conditions on the final tree. Aborts on failure.
+
+    Each op: {assert: str, path: str, pattern?: str, case_sensitive?: bool (default true)}
+    """
     for op in ops:
         assert_type = op.get("assert", "")
         path = op.get("path", "")
         pattern = op.get("pattern", "")
+        case_sensitive = bool(op.get("case_sensitive", True))
         target = work / path
 
         if assert_type == "file_exists":
@@ -182,14 +233,21 @@ def _op_validate(work, ops):
                     f"Validation failed: '{path}' not found (for string_exists check)"
                 )
             content = target.read_text("utf-8", errors="replace")
-            if pattern not in content:
+            if not _contains(content, pattern, case_sensitive):
                 raise RuntimeError(
                     f"Validation failed: '{pattern}' not found in '{path}'"
                 )
         elif assert_type == "string_absent":
             if target.exists():
                 content = target.read_text("utf-8", errors="replace")
-                if pattern in content:
+                if _contains(content, pattern, case_sensitive):
                     raise RuntimeError(
                         f"Validation failed: '{pattern}' found in '{path}'"
                     )
+
+
+def _contains(content, pattern, case_sensitive):
+    """Case-sensitive or case-insensitive substring check."""
+    if case_sensitive:
+        return pattern in content
+    return pattern.casefold() in content.casefold()
