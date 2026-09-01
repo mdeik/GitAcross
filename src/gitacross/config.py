@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 import logging
 import os
+from pathlib import Path
+from typing import final
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
-_VALID_PROJECT_KEYS = {
+VALID_PROJECT_KEYS = {
     "name",
     "enabled",
     "source",
@@ -13,10 +17,7 @@ _VALID_PROJECT_KEYS = {
     "renderer",
     "retry",
     "preserve_description",
-    "preserve_release_description",
     "sync_assets",
-    "preserve_assets",
-    "include_assets",
     "stream_assets",
     "commit_message",
     "commit_template",
@@ -25,7 +26,7 @@ _VALID_PROJECT_KEYS = {
     "description_template",
 }
 
-_KNOWN_SOURCE_KEYS = {
+KNOWN_SOURCE_KEYS = {
     "mode": "source",
     "sync_from": "source",
     "include_prereleases": "source",
@@ -33,7 +34,7 @@ _KNOWN_SOURCE_KEYS = {
     "tag_pattern": "source",
 }
 
-_KNOWN_ENDPOINT_KEYS = {
+KNOWN_ENDPOINT_KEYS = {
     "repo": "source or target",
     "api": "source or target",
     "token": "source or target",
@@ -41,25 +42,90 @@ _KNOWN_ENDPOINT_KEYS = {
 }
 
 
+@final
 class Config:
-    def __init__(self, config_path):
-        with open(config_path) as f:
-            raw = yaml.safe_load(f)
+    """Load and parse a config from a file path or an already-open file object.
+
+    ``config_source`` may be a ``str``/:class:`~pathlib.Path` (opened and read
+    here) or any file-like object with a ``read()`` method (e.g. the result of
+    ``open()`` or an ``io.StringIO``), matching what ``yaml.safe_load`` accepts.
+    To parse YAML held directly in a variable, use :meth:`from_yaml_string`.
+    """
+
+    def __init__(self, config_source):
+        if isinstance(config_source, (str, Path)):
+            try:
+                with open(config_source) as f:
+                    raw = yaml.safe_load(f)
+            except FileNotFoundError as exc:
+                raise Config._missing_source_error(exc, config_source) from exc
+        elif hasattr(config_source, "read"):
+            # Open file-like object (StringIO, an open() handle, BytesIO, ...)
+            raw = yaml.safe_load(config_source)
+        else:
+            raise TypeError(
+                "config_source must be a path (str/Path) or an open file-like "
+                + f"object, got {type(config_source).__name__}"
+            )
+        self.projects = self._projects_from_parsed(raw)
+
+    @classmethod
+    def from_yaml_string(cls, content):
+        """Build a :class:`Config` from raw YAML text (``str`` or ``bytes``).
+
+        Equivalent to wrapping *content* in ``io.StringIO``/``io.BytesIO`` and
+        passing that to :class:`Config`, but hands the string straight to the
+        YAML parser — no intermediate file or stream object:
+
+        >>> config = Config.from_yaml_string("projects: []")
+
+        Raises:
+            yaml.YAMLError: If *content* is not valid YAML.
+            TypeError: If *content* is not a ``str`` or ``bytes``.
+        """
+        if not isinstance(content, (str, bytes)):
+            raise TypeError(
+                "content must be a str or bytes holding YAML, got "
+                + type(content).__name__
+            )
+        config = cls.__new__(cls)
+        config.projects = cls._projects_from_parsed(yaml.safe_load(content))
+        return config
+
+    @staticmethod
+    def _projects_from_parsed(raw) -> list[ProjectConfig]:
+        """Normalize one parsed YAML document into project configs.
+
+        Single source of truth for the accepted top-level shapes: a ``projects``
+        mapping, a flat list of project mappings, or nothing (empty config).
+        Shared by :meth:`__init__` and :meth:`from_yaml_string` so both accept
+        exactly the same documents.
+        """
         if isinstance(raw, list):
             # Flat list at top level: [ {name:..., source:..., ...} ]
             raw = {"projects": raw}
         elif raw is None:
             raw = {"projects": []}
-        self.projects = [ProjectConfig(p) for p in (raw.get("projects") or [])]
+        return [ProjectConfig(p) for p in (raw.get("projects") or [])]
 
-    @classmethod
-    def from_path(cls, config_path):
-        return cls(config_path)
+    @staticmethod
+    def _missing_source_error(exc: FileNotFoundError, config_source) -> FileNotFoundError:
+        """Re-raise a failed path open, hinting when the string looks like YAML
+        content rather than a path. Cosmetic only — never affects dispatch."""
+        text = os.fspath(config_source)
+        hint = (
+            " — did you mean to pass YAML content? Use "
+            + "Config.from_yaml_string(...) or wrap it in io.StringIO(...)."
+            if "\n" in text or ": " in text
+            else ""
+        )
+        return FileNotFoundError(f"{exc}{hint}")
 
     def __repr__(self):
         return f"Config(projects={len(self.projects)})"
 
 
+@final
 class _EndpointConfig:
     """Config for a source or target endpoint.
 
@@ -116,10 +182,11 @@ class _EndpointConfig:
         return f"https://{self.owner}:{self.token}@{host}/{self.repo}.git"
 
 
+@final
 class ProjectConfig:
     def __init__(self, raw):
         if not isinstance(raw, dict):
-            raise ValueError(
+            raise TypeError(
                 f"Project entry must be a map/dict (got {type(raw).__name__})"
             )
         name = raw.get("name")
@@ -136,24 +203,24 @@ class ProjectConfig:
 
         # Check for misplaced or unknown keys at the project level
         for k in raw:
-            if k in _VALID_PROJECT_KEYS:
+            if k in VALID_PROJECT_KEYS:
                 continue
-            if k in _KNOWN_SOURCE_KEYS:
+            if k in KNOWN_SOURCE_KEYS:
                 logger.warning(
                     "Project '%s': '%s' was specified at the project level, but must be configured under '%s:' (e.g. %s.%s: %s).",
                     self.name,
                     k,
-                    _KNOWN_SOURCE_KEYS[k],
-                    _KNOWN_SOURCE_KEYS[k],
+                    KNOWN_SOURCE_KEYS[k],
+                    KNOWN_SOURCE_KEYS[k],
                     k,
                     raw[k],
                 )
-            elif k in _KNOWN_ENDPOINT_KEYS:
+            elif k in KNOWN_ENDPOINT_KEYS:
                 logger.warning(
                     "Project '%s': '%s' was specified at the project level, but belongs under '%s:'.",
                     self.name,
                     k,
-                    _KNOWN_ENDPOINT_KEYS[k],
+                    KNOWN_ENDPOINT_KEYS[k],
                 )
             else:
                 logger.warning(
@@ -163,18 +230,16 @@ class ProjectConfig:
                 )
 
         # preserve_description — single cascade: project → source → target → True
-        # Supports aliases: preserve_release_description (legacy)
         self.preserve_description = _cascade(
             raw, raw_source, raw_target,
-            keys=["preserve_description", "preserve_release_description"],
+            keys=["preserve_description"],
             default=True,
         )
 
         # sync_assets — single cascade: project → source → target → False
-        # Supports aliases: preserve_assets, include_assets (legacy)
         self.sync_assets = _cascade(
             raw, raw_source, raw_target,
-            keys=["sync_assets", "preserve_assets", "include_assets"],
+            keys=["sync_assets"],
             default=False,
         )
 
@@ -202,6 +267,7 @@ class ProjectConfig:
         )
 
 
+@final
 class _AuthorConfig:
     def __init__(self, raw):
         self.name = raw.get("name", "")
@@ -212,6 +278,7 @@ class _AuthorConfig:
         return bool(self.name) or bool(self.email)
 
 
+@final
 class _RendererConfig:
     def __init__(self, raw):
         self.ignore = raw.get("ignore", [])
@@ -220,6 +287,7 @@ class _RendererConfig:
         self.author = _AuthorConfig(raw_author) if raw_author else _AuthorConfig({})
 
 
+@final
 class _RetryConfig:
     def __init__(self, raw):
         self.max_attempts = raw.get("max_attempts", 3)

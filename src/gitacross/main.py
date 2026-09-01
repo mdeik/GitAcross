@@ -6,16 +6,20 @@ Usage:
     python -m gitacross --config config.yml [--project NAME] [--dry-run]
 """
 
+from __future__ import annotations
+
 import argparse
-from datetime import datetime
 import fnmatch
 import logging
 import shutil
 import sys
 import tempfile
+from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
-from .config import Config
+from .config import Config, ProjectConfig
 from .renderer import apply_operations
 from .retry import retry
 from .source import create_source
@@ -23,6 +27,10 @@ from .state import State
 from .target import create_target
 
 logger = logging.getLogger(__name__)
+
+# Default directory for state.yml and cache/ — used by run(), sync_project(),
+# and the CLI --workdir flag so they can't drift apart.
+DEFAULT_WORK_DIR = ".gitsync"
 
 
 def _setup_logging(verbose):
@@ -43,17 +51,22 @@ def _clean_text(text):
     return text
 
 
-class _SafeFormatter(dict):
-    def __missing__(self, key):
-        return "{" + key + "}"
+class _SafeFormatter:
+    """Minimal mapping for ``format_map`` — unknown keys render literally as ``{key}``."""
+
+    def __init__(self, **values: str):
+        self._values: dict[str, str] = values
+
+    def __getitem__(self, key):
+        return self._values.get(key, "{" + key + "}")
 
 
-def _render_template(template: str, context: dict) -> str:
+def _render_template(template: str, context: Mapping[str, Any]) -> str:
     if not template:
         return ""
     try:
         return template.format_map(_SafeFormatter(**context))
-    except Exception:
+    except (IndexError, KeyError, TypeError, ValueError):
         return template
 
 
@@ -112,8 +125,8 @@ def _sync_release_assets(
         asset_path = asset_dir / name
 
         logger.info("Downloading asset %s (%s bytes) from source", name, size)
-        retry(
-            lambda: source.download_asset(asset, asset_path),
+        _ = retry(
+            lambda a=asset, p=asset_path: source.download_asset(a, p),
             max_attempts=retry_max,
             backoff_seconds=retry_backoff,
         )
@@ -128,11 +141,11 @@ def _sync_release_assets(
 
 
 def sync_project(
-    project: "ProjectConfig",
-    work_dir: str = ".gitsync",
+    project: ProjectConfig,
+    work_dir: str | Path = DEFAULT_WORK_DIR,
     dry_run: bool = False,
-    _state: "State" = None,
-) -> list:
+    _state: State | None = None,
+) -> list[dict[str, str | None]]:
     """Sync all new releases for a single project from source to target.
 
     This is the core sync primitive. For most use-cases, prefer the higher-level
@@ -147,7 +160,7 @@ def sync_project(
 
     Args:
         project: A :class:`~gitacross.ProjectConfig` instance (from
-            ``Config.from_path(config_path).projects``).
+            ``Config(config_source).projects``).
         work_dir: Directory for ``state.yml`` and ``cache/`` (default
             ``.gitsync``).
         dry_run: When ``True``, log what *would* happen but make no changes
@@ -219,7 +232,7 @@ def sync_project(
             source_commit = rel.get("commit_sha") or ""
             if not source_commit and not commit_mode and hasattr(source, "resolve_commit"):
                 source_commit = source.resolve_commit(tag)
-            short_sha = (source_commit or (rel.get("commit_sha") or ""))[:12]
+            short_sha = str(source_commit or (rel.get("commit_sha") or ""))[:12]
             source_date = rel.get("source_date") or rel.get("published_at") or ""
             raw_body = _clean_text(rel.get("body", ""))
             release_name = _clean_text(rel.get("name") or tag or "")
@@ -284,7 +297,7 @@ def sync_project(
         source_commit = rel.get("commit_sha") or ""
         if not source_commit and not commit_mode and hasattr(source, "resolve_commit"):
             source_commit = source.resolve_commit(tag)
-        short_sha = (source_commit or (rel.get("commit_sha") or ""))[:12]
+        short_sha = str(source_commit or (rel.get("commit_sha") or ""))[:12]
         source_date = rel.get("source_date") or rel.get("published_at") or ""
         raw_body = _clean_text(rel.get("body", ""))
         release_name = _clean_text(rel.get("name") or tag or "")
@@ -329,7 +342,7 @@ def sync_project(
                 commit_message = (
                     f"Sync commit {short_sha}" if commit_mode else f"Release {tag}"
                 )
-            target.commit(tmpdir, commit_message, date=source_date)
+            _ = target.commit(tmpdir, commit_message, date=source_date)
 
             target_release = None
             if not commit_mode:
@@ -350,7 +363,7 @@ def sync_project(
                     tag=tag,
                     name=release_name,
                     body=release_body,
-                    prerelease=rel.get("prerelease", False),
+                    prerelease=bool(rel.get("prerelease", False)),
                 )
             else:
                 # Commit mode: push the branch only (no tag, no release)
@@ -373,7 +386,7 @@ def sync_project(
                 )
 
             # Persist state (commit mode: keyed by SHA; release/tag: by tag name)
-            target_commit_sha = target.head_sha()
+            target_commit_sha = cast(str, target.head_sha())
 
             state.add_release(
                 project.name,
@@ -411,13 +424,13 @@ def sync_project(
 
 
 def run(
-    config_path,
-    project: str = None,
+    config,
+    project: str | None = None,
     dry_run: bool = False,
     reset: bool = False,
-    work_dir: str = ".gitsync",
+    work_dir: str | Path = DEFAULT_WORK_DIR,
 ):
-    """Sync releases from a config file — the primary Python API entry point.
+    """Sync releases from a config — the primary Python API entry point.
 
     Loads configuration and state, then syncs every enabled project (or just
     the one named by *project*). Unlike :func:`main`, this function raises
@@ -425,8 +438,12 @@ def run(
     each project that was processed.
 
     Args:
-        config_path: Path to the YAML config file (``str`` or
-            :class:`~pathlib.Path`).
+        config:     The configuration to sync from — a :class:`~gitacross.Config`
+            instance, a path to a YAML config file (``str`` or
+            :class:`~pathlib.Path`), or an already-open file-like object
+            (e.g. ``io.StringIO`` holding YAML or an ``open()`` handle).
+            For YAML held in a variable, pass
+            ``Config.from_yaml_string(content)``.
         project:     Optional project name to sync. When ``None`` all enabled
             projects in the config are synced.
         dry_run:     When ``True``, log what *would* happen but make no changes
@@ -454,8 +471,9 @@ def run(
         Disabled projects are silently omitted from the list.
 
     Raises:
-        FileNotFoundError: If *config_path* does not exist.
+        FileNotFoundError: If *config* is a path that does not exist.
         ValueError:        If *project* is specified but not found in the config.
+        yaml.YAMLError:    If the config contains invalid YAML.
 
     Example::
 
@@ -466,21 +484,18 @@ def run(
             latest = r["releases"][-1] if r["releases"] else None
             print(r["project"], f"synced {r['releases_synced']} releases", latest)
     """
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    if not isinstance(config, Config):
+        # Path or open stream — Config() decides which.
+        config = Config(config)
 
     work_dir = Path(work_dir)
 
-    if reset:
-        if work_dir.exists():
-            shutil.rmtree(work_dir)
-            logger.info("Cleared %s/ (state + cache)", work_dir)
+    if reset and work_dir.exists():
+        shutil.rmtree(work_dir)
+        logger.info("Cleared %s/ (state + cache)", work_dir)
 
     work_dir.mkdir(parents=True, exist_ok=True)
     state = State(work_dir)
-
-    config = Config.from_path(str(config_path))
 
     projects = [p for p in config.projects if not project or p.name == project]
     if project and not projects:
@@ -496,8 +511,6 @@ def run(
             synced_releases = sync_project(
                 proj, work_dir=work_dir, dry_run=dry_run, _state=state
             )
-            if synced_releases is None:
-                synced_releases = []
             results.append({
                 "project": proj.name,
                 "synced": True,
@@ -520,39 +533,47 @@ def run(
 
 def main():
     parser = argparse.ArgumentParser(description="Sync releases from source to target")
-    parser.add_argument("--config", required=True, help="Path to config.yml")
-    parser.add_argument("--project", help="Sync only this project (by name)")
-    parser.add_argument(
+    _ = parser.add_argument("--config", required=True, help="Path to config.yml")
+    _ = parser.add_argument("--project", help="Sync only this project (by name)")
+    _ = parser.add_argument(
         "--dry-run", action="store_true", help="Print changes without pushing"
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--reset",
         action="store_true",
         help="Clear state and cache before running (fresh start)",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--lint",
         action="store_true",
         help="Lint config file for YAML errors, invalid settings, and redundant options",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--fix",
         action="store_true",
         help="Automatically fix misplaced keys and remove redundant options in config file",
     )
-    parser.add_argument(
+    _ = parser.add_argument(
         "--workdir",
-        default=".gitsync",
+        default=DEFAULT_WORK_DIR,
         help="Directory for state.yml and cache/ (default: .gitsync)",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+    _ = parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
-    _setup_logging(args.verbose)
+    # Convert argparse's Any values into concrete types (cast is the escape hatch).
+    verbose = cast(bool, args.verbose)
+    config_path = Path(cast(str, args.config))
+    fix_flag = cast(bool, args.fix)
+    lint_flag = cast(bool, args.lint)
+    project_filter = None if args.project is None else cast(str, args.project)
+    dry_run_flag = cast(bool, args.dry_run)
+    reset_flag = cast(bool, args.reset)
+    workdir = cast(str, args.workdir)
 
-    config_path = Path(args.config)
+    _setup_logging(verbose)
 
-    if args.fix:
+    if fix_flag:
         if not config_path.exists():
             sys.exit(f"Config file not found: {config_path}")
         from .linter import fix_config, lint_config
@@ -560,13 +581,13 @@ def main():
         fix_report = fix_config(config_path)
         if not fix_report.is_valid:
             sys.exit(1)
-        if args.lint:
+        if lint_flag:
             print()
             lint_report = lint_config(config_path)
             sys.exit(0 if lint_report.is_valid else 1)
         sys.exit(0)
 
-    if args.lint:
+    if lint_flag:
         if not config_path.exists():
             sys.exit(f"Config file not found: {config_path}")
         from .linter import lint_config
@@ -577,10 +598,10 @@ def main():
     try:
         results = run(
             config_path,
-            project=args.project,
-            dry_run=args.dry_run,
-            reset=args.reset,
-            work_dir=args.workdir,
+            project=project_filter,
+            dry_run=dry_run_flag,
+            reset=reset_flag,
+            work_dir=workdir,
         )
     except (FileNotFoundError, ValueError) as exc:
         sys.exit(str(exc))
