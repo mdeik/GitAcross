@@ -8,6 +8,8 @@ To add a new provider:
 That's it — ``source.py`` and ``target.py`` use ``get_api_client`` and never
 need to know which concrete class was returned.
 """
+from __future__ import annotations
+
 
 from .gitea import GiteaClient
 from .github import GitHubClient

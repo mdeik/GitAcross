@@ -1,0 +1,12 @@
+{
+  "reportMissingParameterType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownLambdaType": "none",
+  "reportImplicitOverride": "none",
+  "reportAny": "none",
+  "reportExplicitAny": "none",
+  "reportPrivateUsage": "none"
+}

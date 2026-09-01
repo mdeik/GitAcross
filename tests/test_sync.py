@@ -4,6 +4,8 @@
 Run: python3 test_sync.py
 """
 
+from __future__ import annotations
+
 import email.message
 import io
 import json
@@ -13,6 +15,7 @@ import sys
 import tempfile
 import urllib.error
 from pathlib import Path
+from typing import Any, cast, final
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -33,13 +36,13 @@ def _make_file(root, path, content="hello"):
 
 def _make_git_repo(path):
     """Init a bare or non-bare git repo at *path* and return it."""
-    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
-    subprocess.run(
+    _ = subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    _ = subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test"],
         check=True,
         capture_output=True,
     )
-    subprocess.run(
+    _ = subprocess.run(
         ["git", "-C", str(path), "config", "user.name", "Test"],
         check=True,
         capture_output=True,
@@ -48,10 +51,10 @@ def _make_git_repo(path):
 
 
 def _git_commit(path, msg="init"):
-    subprocess.run(
+    _ = subprocess.run(
         ["git", "-C", str(path), "add", "-A"], check=True, capture_output=True
     )
-    subprocess.run(
+    _ = subprocess.run(
         ["git", "-C", str(path), "commit", "-m", msg, "--allow-empty"],
         check=True,
         capture_output=True,
@@ -59,7 +62,7 @@ def _git_commit(path, msg="init"):
 
 
 def _git_tag(path, tag):
-    subprocess.run(
+    _ = subprocess.run(
         ["git", "-C", str(path), "tag", tag], check=True, capture_output=True
     )
 
@@ -92,7 +95,7 @@ projects:
       backoff_seconds: 3
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         config_path = f.name
 
     try:
@@ -144,7 +147,7 @@ projects:
       branch: releases
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         config_path = f.name
 
     try:
@@ -184,7 +187,7 @@ projects:
       branch: main
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         config_path = f.name
 
     try:
@@ -233,7 +236,7 @@ projects:
       path: /tmp/f
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         config_path = f.name
 
     try:
@@ -249,6 +252,7 @@ projects:
 
 def test_config_warnings_for_misplaced_keys(caplog):
     import logging
+
     from gitacross.config import Config
 
     yaml_text = """
@@ -265,7 +269,7 @@ projects:
       path: /tmp/b
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         config_path = f.name
 
     try:
@@ -281,6 +285,218 @@ projects:
         os.unlink(config_path)
 
 
+def test_config_from_file_object():
+    from gitacross.config import Config
+    from gitacross.linter import lint_config
+
+    yaml_text = """
+projects:
+  - name: stream-app
+    source:
+      type: local
+      path: /tmp/a
+    target:
+      type: local
+      path: /tmp/b
+"""
+
+    # Config accepts an in-memory stream (no temp file needed)
+    cfg = Config(io.StringIO(yaml_text))
+    assert len(cfg.projects) == 1
+    assert cfg.projects[0].name == "stream-app"
+
+    # An opened file handle works too
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        _ = f.write(yaml_text)
+        config_path = f.name
+    try:
+        with open(config_path) as fh:
+            assert Config(fh).projects[0].name == "stream-app"
+        # lint_config accepts a stream as well
+        report = lint_config(io.StringIO(yaml_text), print_output=False)
+        assert report.is_valid, [i.message for i in report.issues]
+    finally:
+        os.unlink(config_path)
+
+    # from_yaml_string parses raw YAML text directly — no file or stream
+    cfg = Config.from_yaml_string(yaml_text)
+    assert len(cfg.projects) == 1
+    assert cfg.projects[0].name == "stream-app"
+    # str and bytes are both accepted
+    assert Config.from_yaml_string(yaml_text.encode()).projects[0].name == "stream-app"
+
+    print("  ✓ config: from file object / stream")
+
+
+def test_config_invalid_inputs():
+    """Config() fails loudly and clearly on invalid inputs."""
+    import yaml
+
+    from gitacross.config import Config
+
+    # Missing path
+    try:
+        _ = Config("/nonexistent/x.yml")
+        assert False, "should have raised FileNotFoundError"
+    except FileNotFoundError:
+        pass
+
+    # YAML content passed as a path still raises, but hints at the string API
+    try:
+        _ = Config("projects: []")
+        assert False, "should have raised FileNotFoundError"
+    except FileNotFoundError as e:
+        assert "from_yaml_string" in str(e), str(e)
+
+    # Garbage types -> clear TypeError, not a cryptic PyYAML error
+    for bad in (None, 123, object()):
+        try:
+            _ = Config(bad)
+            assert False, f"Config({bad!r}) should have raised TypeError"
+        except TypeError as e:
+            assert "config_source" in str(e), str(e)
+
+    # Invalid YAML propagates as yaml.YAMLError (loader must fail loudly)
+    try:
+        _ = Config(io.StringIO("projects: [oops: {"))
+        assert False, "should have raised yaml.YAMLError"
+    except yaml.YAMLError:
+        pass
+
+    # Binary streams parse too (same duck-typed path as text streams)
+    assert Config(io.BytesIO(b"projects: []\n")).projects == []
+
+    # from_yaml_string rejects non-text and malformed YAML loudly
+    try:
+        _ = Config.from_yaml_string(None)
+        assert False, "from_yaml_string(None) should have raised TypeError"
+    except TypeError as e:
+        assert "content" in str(e), str(e)
+    try:
+        _ = Config.from_yaml_string("projects: [oops: {")
+        assert False, "should have raised yaml.YAMLError"
+    except yaml.YAMLError:
+        pass
+
+    print("  ✓ config: invalid inputs raise clearly")
+
+
+def test_run_input_forms_equivalent():
+    """run() accepts path / stream / Config instance with identical results."""
+    import gitacross
+    from gitacross.config import Config
+
+    yaml_text = """projects:
+  - name: proj-a
+    source: {type: local, path: /tmp/a}
+    target: {type: local, path: /tmp/b}
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        _ = f.write(yaml_text)
+        config_path = f.name
+    try:
+        with mock.patch("gitacross.main.sync_project", return_value=[]):
+            by_path = gitacross.run(config_path, work_dir=tempfile.mkdtemp())
+            by_stream = gitacross.run(io.StringIO(yaml_text), work_dir=tempfile.mkdtemp())
+            by_instance = gitacross.run(
+                Config(io.StringIO(yaml_text)), work_dir=tempfile.mkdtemp()
+            )
+            by_string = gitacross.run(
+                Config.from_yaml_string(yaml_text), work_dir=tempfile.mkdtemp()
+            )
+        assert by_path == by_stream == by_instance == by_string
+        assert [r["project"] for r in by_path] == ["proj-a"]
+    finally:
+        os.unlink(config_path)
+
+    print("  ✓ run: path / stream / Config instance are equivalent")
+
+
+def test_run_invalid_config_inputs():
+    """run() fails loudly on invalid YAML and garbage config types."""
+    import yaml
+
+    import gitacross
+
+    # Invalid YAML via path and via stream both raise yaml.YAMLError
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        _ = f.write("projects: [oops: {")
+        bad_path = f.name
+    try:
+        for source in (bad_path, io.StringIO("projects: [oops: {")):
+            try:
+                _ = gitacross.run(source, work_dir=tempfile.mkdtemp())
+                assert False, "should have raised yaml.YAMLError"
+            except yaml.YAMLError:
+                pass
+    finally:
+        os.unlink(bad_path)
+
+    # Garbage types -> TypeError with a clear message
+    for bad in (None, 123):
+        try:
+            _ = gitacross.run(bad, work_dir=tempfile.mkdtemp())
+            assert False, f"run({bad!r}) should have raised TypeError"
+        except TypeError as e:
+            assert "config_source" in str(e), str(e)
+
+    print("  ✓ run: invalid config inputs raise")
+
+
+def test_lint_config_input_forms():
+    """lint_config() accepts paths, text/binary streams, and handles alike."""
+    from gitacross.linter import lint_config
+
+    yaml_text = """projects:
+  - name: lint-app
+    source: {type: local, path: /a}
+    target: {type: local, path: /b}
+"""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        _ = f.write(yaml_text)
+        config_path = f.name
+    try:
+        for source in (
+            config_path,                      # path
+            io.StringIO(yaml_text),           # text stream
+            io.BytesIO(yaml_text.encode()),   # binary stream
+        ):
+            report = lint_config(source, print_output=False)
+            assert report.is_valid, [i.message for i in report.issues]
+        with open(config_path) as fh:         # opened handle
+            assert lint_config(fh, print_output=False).is_valid
+    finally:
+        os.unlink(config_path)
+
+    # Missing path -> reported, not raised
+    report = lint_config("/nonexistent/x.yml", print_output=False)
+    assert not report.is_valid
+    assert any("File not found" in e.message for e in report.errors)
+
+    # Invalid YAML stream -> reported, not raised
+    report = lint_config(io.StringIO("projects: [oops: {"), print_output=False)
+    assert not report.is_valid
+    assert any("YAML syntax error" in e.message for e in report.errors)
+
+    # Garbage type -> reported as a stream read failure, not raised
+    report = lint_config(cast(Any, None), print_output=False)
+    assert not report.is_valid
+    assert any("Cannot read config stream" in e.message for e in report.errors)
+
+    print("  ✓ lint_config: path / stream / handle / binary / invalid inputs")
+
+
+def test_fix_config_missing_file():
+    """fix_config() reports a missing file in the FixReport instead of raising."""
+    from gitacross.linter import fix_config
+
+    report = fix_config("/nonexistent/x.yml", write_back=False, print_output=False)
+    assert not report.is_valid
+    assert report.error and "File not found" in report.error
+
+    print("  ✓ fix_config: missing file reported, not raised")
+
+
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
@@ -292,11 +508,11 @@ def test_config_empty_projects():
     with tempfile.TemporaryDirectory() as tmp:
         # Bare `projects:` key (no list) must not crash
         bare = Path(tmp) / "bare.yml"
-        bare.write_text("projects:\n")
+        _ = bare.write_text("projects:\n")
         assert Config(str(bare)).projects == []
 
         empty = Path(tmp) / "empty.yml"
-        empty.write_text("projects: []\n")
+        _ = empty.write_text("projects: []\n")
         assert Config(str(empty)).projects == []
 
     print("  ✓ config: empty projects list parses to zero projects")
@@ -308,19 +524,19 @@ def test_config_empty_project_entry():
 
     with tempfile.TemporaryDirectory() as tmp:
         empty = Path(tmp) / "empty_entry.yml"
-        empty.write_text("projects:\n  - {}\n")
+        _ = empty.write_text("projects:\n  - {}\n")
         try:
-            Config(str(empty))
+            _ = Config(str(empty))
             assert False, "should have raised"
         except ValueError as e:
             assert "'name'" in str(e)
 
         notmap = Path(tmp) / "notmap.yml"
-        notmap.write_text("projects:\n  - 42\n")
+        _ = notmap.write_text("projects:\n  - 42\n")
         try:
-            Config(str(notmap))
+            _ = Config(str(notmap))
             assert False, "should have raised"
-        except ValueError as e:
+        except TypeError as e:
             assert "map/dict" in str(e)
 
     print("  ✓ config: empty/non-map project entries raise a clear error")
@@ -351,70 +567,13 @@ def test_state():
         print("  ✓ state persistence")
 
 
-def test_state_migrates_old_id_keys():
-    """Old state files keyed by API release id are re-keyed by tag name on load."""
-    from gitacross.state import State
-
-    with tempfile.TemporaryDirectory() as tmp:
-        state_path = Path(tmp) / "state.yml"
-        state_path.write_text(
-            """
-projects:
-  myapp:
-    releases:
-      "12345":
-        tag: v1.0
-        target_commit: abc123
-        published_at: "2026-07-07T10:00:00Z"
-      "67890":
-        tag: v2.0
-        target_commit: def456
-        published_at: "2026-07-08T10:00:00Z"
-"""
-        )
-
-        state = State(tmp)
-        assert state.has_release("myapp", "v1.0")
-        assert state.has_release("myapp", "v2.0")
-        assert not state.has_release("myapp", "12345")
-        assert not state.has_release("myapp", "67890")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        # A stale id-keyed duplicate must not overwrite the tag-keyed entry
-        state_path = Path(tmp) / "state.yml"
-        state_path.write_text(
-            """
-projects:
-  myapp:
-    releases:
-      "12345":
-        tag: v1.0
-        target_commit: stale
-        published_at: "2026-07-07T10:00:00Z"
-      v1.0:
-        tag: v1.0
-        target_commit: abc123
-        published_at: "2026-07-07T10:00:00Z"
-"""
-        )
-
-        state = State(tmp)
-        releases = state._data["projects"]["myapp"]["releases"]
-        assert "v1.0" in releases
-        assert "12345" not in releases
-        assert releases["v1.0"]["target_commit"] == "abc123"
-        assert releases["v1.0"]["source_date"] == "2026-07-07T10:00:00Z"
-        assert "published_at" not in releases["v1.0"]
-
-        print("  ✓ state: migrates id keys to tag keys and published_at to source_date")
-
 
 # ---------------------------------------------------------------------------
 # Renderer
 # ---------------------------------------------------------------------------
 
 
-def _make_project_raw(ops=None):
+def _make_project_raw(ops=None) -> dict[str, Any]:
     """Minimal config dict for renderer tests."""
     raw = {
         "name": "test",
@@ -449,10 +608,10 @@ def test_renderer_ignore():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md")
-        _make_file(root, ".env", "SECRET=1")
-        _make_file(root, "node_modules/foo/index.js")
-        _make_file(root, "src/main.py")
+        _ = _make_file(root, "README.md")
+        _ = _make_file(root, ".env", "SECRET=1")
+        _ = _make_file(root, "node_modules/foo/index.js")
+        _ = _make_file(root, "src/main.py")
 
         apply_operations(root, project)
 
@@ -473,11 +632,11 @@ def test_renderer_remove():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md")
-        _make_file(root, "docs/guide.md")
-        _make_file(root, "docs/api/ref.md")
-        _make_file(root, "config.secret")
-        _make_file(root, ".env.secret")
+        _ = _make_file(root, "README.md")
+        _ = _make_file(root, "docs/guide.md")
+        _ = _make_file(root, "docs/api/ref.md")
+        _ = _make_file(root, "config.secret")
+        _ = _make_file(root, ".env.secret")
 
         apply_operations(root, project)
 
@@ -498,8 +657,8 @@ def test_renderer_rename():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md")
-        _make_file(root, ".gitea/workflows/build.yml")
+        _ = _make_file(root, "README.md")
+        _ = _make_file(root, ".gitea/workflows/build.yml")
 
         apply_operations(root, project)
 
@@ -519,8 +678,8 @@ def test_renderer_rename_conflict():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "a.txt", "content-a")
-        _make_file(root, "b.txt", "content-b")
+        _ = _make_file(root, "a.txt", "content-a")
+        _ = _make_file(root, "b.txt", "content-b")
 
         try:
             apply_operations(root, project)
@@ -554,8 +713,8 @@ def test_renderer_replace():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md", "Visit https://gitea.example.com for code.")
-        _make_file(root, "setup.py", "url = 'https://gitea.example.com'")
+        _ = _make_file(root, "README.md", "Visit https://gitea.example.com for code.")
+        _ = _make_file(root, "setup.py", "url = 'https://gitea.example.com'")
 
         apply_operations(root, project)
 
@@ -580,7 +739,7 @@ def test_renderer_replace_literal():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "file.txt", "prefix old-text suffix")
+        _ = _make_file(root, "file.txt", "prefix old-text suffix")
 
         apply_operations(root, project)
 
@@ -604,7 +763,7 @@ def test_renderer_replace_case_insensitive():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "file.txt", "gitea Gitea GITEA")
+        _ = _make_file(root, "file.txt", "gitea Gitea GITEA")
 
         apply_operations(root, project)
 
@@ -633,7 +792,7 @@ def test_renderer_replace_match_case():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "file.txt", "gitea Gitea GITEA")
+        _ = _make_file(root, "file.txt", "gitea Gitea GITEA")
 
         apply_operations(root, project)
 
@@ -665,7 +824,7 @@ def test_renderer_replace_regex_case_options():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "file.txt", "gitea Gitea GITEA")
+        _ = _make_file(root, "file.txt", "gitea Gitea GITEA")
 
         apply_operations(root, project)
 
@@ -683,8 +842,8 @@ def test_renderer_replace_path_takes_precedence_over_glob():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "a.txt", "gitea")
-        _make_file(root, "SPECIAL.md", "gitea")
+        _ = _make_file(root, "a.txt", "gitea")
+        _ = _make_file(root, "SPECIAL.md", "gitea")
 
         apply_operations(root, project)
 
@@ -704,9 +863,9 @@ def test_renderer_replace_skips_binary_files():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md", "hello text")
+        _ = _make_file(root, "README.md", "hello text")
         binary = root / "bin.dat"
-        binary.write_bytes(b"\x00\x01\xff\xfehello\x00")
+        _ = binary.write_bytes(b"\x00\x01\xff\xfehello\x00")
 
         apply_operations(root, project)
 
@@ -730,7 +889,7 @@ def test_renderer_operation_order():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "OLD.md", "host: gitea.example.com")
+        _ = _make_file(root, "OLD.md", "host: gitea.example.com")
 
         apply_operations(root, project)
 
@@ -749,7 +908,7 @@ def test_renderer_rename_glob_not_implemented():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "a.md")
+        _ = _make_file(root, "a.md")
         try:
             apply_operations(root, project)
             assert False, "should have raised NotImplementedError"
@@ -770,7 +929,7 @@ def test_renderer_replace_invalid_regex_raises():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "a.md", "content")
+        _ = _make_file(root, "a.md", "content")
         try:
             apply_operations(root, project)
             assert False, "should have raised re.error"
@@ -796,7 +955,7 @@ def test_renderer_validate_ok():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md")
+        _ = _make_file(root, "README.md")
         apply_operations(root, project)
 
     print("  ✓ renderer validate (pass)")
@@ -818,7 +977,7 @@ def test_renderer_add():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md")
+        _ = _make_file(root, "README.md")
         apply_operations(root, project)
 
         assert (root / "NEW_FILE.md").exists()
@@ -839,7 +998,7 @@ def test_renderer_validate_fail():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md")
+        _ = _make_file(root, "README.md")
 
         try:
             apply_operations(root, project)
@@ -867,7 +1026,7 @@ def test_renderer_validate_case_insensitive():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md", "Welcome to Gitea!")
+        _ = _make_file(root, "README.md", "Welcome to Gitea!")
         apply_operations(root, project)  # no raise = pass
 
     # The same patterns are case-sensitive by default and must fail.
@@ -882,7 +1041,7 @@ def test_renderer_validate_case_insensitive():
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        _make_file(root, "README.md", "Welcome to Gitea!")
+        _ = _make_file(root, "README.md", "Welcome to Gitea!")
         try:
             apply_operations(root, project)
             assert False, "Should have raised"
@@ -902,11 +1061,11 @@ def test_git_repo_local_tags():
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
-        _make_file(repo, "README.md")
+        _ = _make_git_repo(repo)
+        _ = _make_file(repo, "README.md")
         _git_commit(repo, "first")
         _git_tag(repo, "v1.0")
-        _make_file(repo, "CHANGELOG.md")
+        _ = _make_file(repo, "CHANGELOG.md")
         _git_commit(repo, "second")
         _git_tag(repo, "v2.0")
 
@@ -926,8 +1085,8 @@ def test_git_repo_export_tag():
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
-        _make_file(repo, "hello.txt", "world")
+        _ = _make_git_repo(repo)
+        _ = _make_file(repo, "hello.txt", "world")
         _git_commit(repo, "first")
         _git_tag(repo, "v1.0")
 
@@ -942,12 +1101,31 @@ def test_git_repo_export_tag():
         print("  ✓ git: export tag")
 
 
+def test_git_repo_export_empty_tree():
+    """Exporting a repo with an empty tree (no files) must not crash."""
+    from gitacross.git import GitRepo
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp) / "repo"
+        _ = _make_git_repo(repo)
+        _git_commit(repo, "empty")
+        _git_tag(repo, "v1.0")
+
+        git = GitRepo.local(repo)
+        dest = Path(tmp) / "export"
+        dest.mkdir()
+        git.export_tag("v1.0", dest)  # must not raise
+        assert list(dest.iterdir()) == []
+
+    print("  ✓ git: export tag from empty tree")
+
+
 def test_git_repo_commit_and_tag():
     from gitacross.git import GitRepo
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
+        _ = _make_git_repo(repo)
 
         git = GitRepo.local(repo)
         git.ensure_branch("main")
@@ -955,9 +1133,9 @@ def test_git_repo_commit_and_tag():
         # Commit from a work dir
         work = Path(tmp) / "work"
         work.mkdir()
-        _make_file(work, "release.txt", "v1.0 content")
+        _ = _make_file(work, "release.txt", "v1.0 content")
 
-        git.commit(work, "Release v1.0")
+        _ = git.commit(work, "Release v1.0")
         git.tag("v1.0", "Release v1.0")
 
         assert git.tag_exists("v1.0") is True
@@ -967,8 +1145,8 @@ def test_git_repo_commit_and_tag():
         # Second commit (linear)
         work2 = Path(tmp) / "work2"
         work2.mkdir()
-        _make_file(work2, "release.txt", "v2.0 content")
-        git.commit(work2, "Release v2.0")
+        _ = _make_file(work2, "release.txt", "v2.0 content")
+        _ = git.commit(work2, "Release v2.0")
         git.tag("v2.0", "Release v2.0")
 
         assert git.tag_exists("v2.0") is True
@@ -989,11 +1167,11 @@ def test_source_local():
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
-        _make_file(repo, "f.txt")
+        _ = _make_git_repo(repo)
+        _ = _make_file(repo, "f.txt")
         _git_commit(repo, "c1")
         _git_tag(repo, "v1.0")
-        _make_file(repo, "g.txt")
+        _ = _make_file(repo, "g.txt")
         _git_commit(repo, "c2")
         _git_tag(repo, "v2.0")
         _git_tag(repo, "beta1")
@@ -1025,14 +1203,14 @@ def test_source_local_sync_from():
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
-        _make_file(repo, "a.txt")
+        _ = _make_git_repo(repo)
+        _ = _make_file(repo, "a.txt")
         _git_commit(repo, "c1")
         _git_tag(repo, "v1.0")
-        _make_file(repo, "b.txt")
+        _ = _make_file(repo, "b.txt")
         _git_commit(repo, "c2")
         _git_tag(repo, "v2.0")
-        _make_file(repo, "c.txt")
+        _ = _make_file(repo, "c.txt")
         _git_commit(repo, "c3")
         _git_tag(repo, "v3.0")
 
@@ -1317,7 +1495,7 @@ def test_source_remote_invalid_mode():
     )
 
     try:
-        create_source(cfg, "cache")
+        _ = create_source(cfg, "cache")
         assert False, "should raise"
     except ValueError as e:
         assert "mode" in str(e)
@@ -1328,6 +1506,7 @@ def test_source_remote_warns_when_no_releases_or_tags(caplog):
     """When a remote source in release mode has no API releases and no tags, log a warning."""
     import logging
     from unittest import mock
+
     from gitacross.config import _EndpointConfig
     from gitacross.source import _RemoteSource
 
@@ -1349,10 +1528,9 @@ def test_source_remote_warns_when_no_releases_or_tags(caplog):
 
     with mock.patch("gitacross.source.get_api_client", return_value=api), mock.patch(
         "gitacross.source.GitRepo.ensure_mirror", return_value=mirror
-    ):
-        with caplog.at_level(logging.WARNING):
-            src = _RemoteSource(cfg, "cache")
-            releases = src.fetch_releases()
+    ), caplog.at_level(logging.WARNING):
+        src = _RemoteSource(cfg, "cache")
+        releases = src.fetch_releases()
 
     assert releases == []
     assert "No API releases or git tags found for gitea repo 'u/test'" in caplog.text
@@ -1364,6 +1542,7 @@ def test_source_remote_mode_tag_warns_when_no_tags(caplog):
     """When a remote source in tag mode has no tags, log a warning."""
     import logging
     from unittest import mock
+
     from gitacross.config import _EndpointConfig
     from gitacross.source import _RemoteSource
 
@@ -1384,10 +1563,9 @@ def test_source_remote_mode_tag_warns_when_no_tags(caplog):
 
     with mock.patch("gitacross.source.get_api_client", return_value=api), mock.patch(
         "gitacross.source.GitRepo.ensure_mirror", return_value=mirror
-    ):
-        with caplog.at_level(logging.WARNING):
-            src = _RemoteSource(cfg, "cache")
-            releases = src.fetch_releases()
+    ), caplog.at_level(logging.WARNING):
+        src = _RemoteSource(cfg, "cache")
+        releases = src.fetch_releases()
 
     assert releases == []
     assert "No git tags found for gitea repo 'u/test'" in caplog.text
@@ -1403,7 +1581,7 @@ def test_git_ensure_mirror_prunes_stale_refs():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         remote = tmp / "remote.git"
-        subprocess.run(
+        _ = subprocess.run(
             ["git", "init", "--bare", "-q", str(remote)],
             check=True,
             capture_output=True,
@@ -1411,13 +1589,13 @@ def test_git_ensure_mirror_prunes_stale_refs():
 
         # Scratch repo with a commit + tag, then a mirror of it
         scratch = tmp / "scratch"
-        _make_git_repo(scratch)
-        _make_file(scratch, "f.txt")
+        _ = _make_git_repo(scratch)
+        _ = _make_file(scratch, "f.txt")
         _git_commit(scratch, "c1")
         _git_tag(scratch, "v0.9.0")
 
         mirror = tmp / "mirror.git"
-        subprocess.run(
+        _ = subprocess.run(
             ["git", "clone", "--mirror", "-q", str(scratch), str(mirror)],
             check=True,
             capture_output=True,
@@ -1427,11 +1605,12 @@ def test_git_ensure_mirror_prunes_stale_refs():
         assert repo.head_sha()
 
         # ensure_mirror against the empty remote: the local-only refs must go
-        GitRepo.ensure_mirror(str(remote), str(mirror))
+        _ = GitRepo.ensure_mirror(str(remote), str(mirror))
         assert "v0.9.0" not in repo.list_tags()
         heads = subprocess.run(
             ["git", "--git-dir", str(mirror), "for-each-ref", "--format=%(refname)", "refs/heads"],
             capture_output=True,
+            check=True,
             text=True,
         ).stdout.strip()
         assert heads == ""
@@ -1450,7 +1629,7 @@ def test_target_local():
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
+        _ = _make_git_repo(repo)
 
         cfg = _EndpointConfig(
             {
@@ -1467,8 +1646,8 @@ def test_target_local():
         # Commit something
         work = Path(tmp) / "work"
         work.mkdir()
-        _make_file(work, "artifact.txt", "hello")
-        tgt.commit(work, "Release v1.0")
+        _ = _make_file(work, "artifact.txt", "hello")
+        _ = tgt.commit(work, "Release v1.0")
         tgt.tag("v1.0", "Release v1.0")
 
         assert tgt.tag_exists("v1.0") is True
@@ -1477,7 +1656,7 @@ def test_target_local():
         # Push is a no-op for local — should not crash with or without tag
         tgt.push("main", "v1.0")
         tgt.push("main")
-        tgt.create_release("v1.0", "v1.0", "body")
+        _ = tgt.create_release("v1.0", "v1.0", "body")
         print("  ✓ target: local")
 
 
@@ -1500,10 +1679,7 @@ def test_target_remote_push_commit_mode():
         mock_api.ensure_repo_exists.return_value = {"clone_url": "https://github.com/owner/repo.git"}
         mock_git = mock.MagicMock()
 
-        with (
-            mock.patch("gitacross.target.get_api_client", return_value=mock_api),
-            mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-        ):
+        with mock.patch("gitacross.target.get_api_client", return_value=mock_api), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git):
             tgt = create_target(cfg, tmp)
 
             # Push with tag (release mode — force tag with +)
@@ -1563,6 +1739,7 @@ def test_retry_failure():
 # ---------------------------------------------------------------------------
 
 
+@final
 class _FakeHTTPResponse:
     def __init__(self, body=b"{}"):
         self._body = body
@@ -1587,18 +1764,18 @@ def _http_error(code):
     )
 
 
-def test_github_verify_access_ok():
+def test_github_ensure_repo_exists_ok():
     from gitacross.providers.github import GitHubClient
 
     client = GitHubClient("https://api.github.com", "owner/repo", "token")
     with mock.patch(
         "gitacross.providers.base.urllib.request.urlopen", return_value=_FakeHTTPResponse()
     ):
-        client.verify_access()  # should not raise
-    print("  ✓ github: verify_access accepts a reachable repo")
+        _ = client.ensure_repo_exists()  # should not raise
+    print("  ✓ github: ensure_repo_exists accepts a reachable repo")
 
 
-def test_github_verify_access_missing_repo_creates_it():
+def test_github_ensure_repo_exists_missing_repo_creates_it():
     """When the repo 404s, ensure_repo_exists should create it and return metadata."""
     from gitacross.providers.github import GitHubClient
 
@@ -1608,7 +1785,7 @@ def test_github_verify_access_missing_repo_creates_it():
 
     call_count = 0
 
-    def fake_urlopen(req):
+    def fake_urlopen(_req):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1622,11 +1799,12 @@ def test_github_verify_access_missing_repo_creates_it():
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
         result = client.ensure_repo_exists()
+    assert result is not None
     assert result["clone_url"] == repo_meta["clone_url"]
     print("  ✓ github: ensure_repo_exists auto-creates a missing repo")
 
 
-def test_github_verify_access_missing_repo_creates_it_org():
+def test_github_ensure_repo_exists_missing_repo_creates_it_org():
     """When the owner is an org (not the token user), use /orgs/{org}/repos."""
     from gitacross.providers.github import GitHubClient
 
@@ -1649,6 +1827,7 @@ def test_github_verify_access_missing_repo_creates_it_org():
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
         result = client.ensure_repo_exists()
+    assert result is not None
     assert result["clone_url"] == repo_meta["clone_url"]
     assert any("/orgs/my-org/repos" in u for u in created_urls), "should POST to org endpoint"
     print("  ✓ github: ensure_repo_exists auto-creates a missing org repo")
@@ -1656,8 +1835,9 @@ def test_github_verify_access_missing_repo_creates_it_org():
 
 def test_github_create_repo_is_private():
     """Auto-created repos must be private=True in the POST payload."""
-    from gitacross.providers.github import GitHubClient
     import json as _json
+
+    from gitacross.providers.github import GitHubClient
 
     client = GitHubClient("https://api.github.com", "owner/newrepo", "token")
     user_meta = {"login": "owner"}
@@ -1677,7 +1857,7 @@ def test_github_create_repo_is_private():
         return _FakeHTTPResponse(_json.dumps(repo_meta).encode())
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
-        client.ensure_repo_exists()
+        _ = client.ensure_repo_exists()
     assert posted_bodies, "should have POSTed a create-repo body"
     assert posted_bodies[0]["private"] is True, "repo should be created as private"
     print("  ✓ github: auto-created repo uses private=True")
@@ -1692,7 +1872,7 @@ def test_github_create_repo_404_then_422_private_collision():
 
     call_count = 0
 
-    def fake_urlopen(req):
+    def fake_urlopen(_req):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1703,7 +1883,7 @@ def test_github_create_repo_404_then_422_private_collision():
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
         try:
-            client.ensure_repo_exists()
+            _ = client.ensure_repo_exists()
             assert False, "should raise"
         except RuntimeError as e:
             msg = str(e)
@@ -1712,21 +1892,21 @@ def test_github_create_repo_404_then_422_private_collision():
     print("  ✓ github: 404 → 422 raises actionable private-repo-collision error")
 
 
-def test_github_verify_access_401_raises_directly():
+def test_github_ensure_repo_exists_401_raises_directly():
     """401 should raise immediately without ever attempting repo creation."""
     from gitacross.providers.github import GitHubClient
 
     client = GitHubClient("https://api.github.com", "owner/repo", "token")
     call_count = 0
 
-    def fake_urlopen(req):
+    def fake_urlopen(_req):
         nonlocal call_count
         call_count += 1
         raise _http_error(401)
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
         try:
-            client.ensure_repo_exists()
+            _ = client.ensure_repo_exists()
             assert False, "should raise"
         except RuntimeError as e:
             assert "invalid or expired" in str(e)
@@ -1734,7 +1914,7 @@ def test_github_verify_access_401_raises_directly():
     print("  ✓ github: 401 raises immediately without attempting creation")
 
 
-def test_gitea_verify_access_bad_token():
+def test_gitea_ensure_repo_exists_bad_token():
     from gitacross.providers.gitea import GiteaClient
 
     client = GiteaClient("https://git.example.com/api/v1", "owner/repo", "token")
@@ -1742,17 +1922,18 @@ def test_gitea_verify_access_bad_token():
         "gitacross.providers.base.urllib.request.urlopen", side_effect=_http_error(401)
     ):
         try:
-            client.verify_access()
+            _ = client.ensure_repo_exists()
             assert False, "should raise"
         except RuntimeError as e:
             assert "invalid or expired" in str(e)
-    print("  ✓ gitea: verify_access explains a bad token")
+    print("  ✓ gitea: ensure_repo_exists explains a bad token")
 
 
 def test_gitea_create_repo_is_private():
     """Auto-created Gitea repos must be private=True in the POST payload."""
-    from gitacross.providers.gitea import GiteaClient
     import json as _json
+
+    from gitacross.providers.gitea import GiteaClient
 
     client = GiteaClient("https://git.example.com/api/v1", "owner/newrepo", "token")
     user_meta = {"login": "owner"}
@@ -1772,7 +1953,7 @@ def test_gitea_create_repo_is_private():
         return _FakeHTTPResponse(_json.dumps(repo_meta).encode())
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
-        client.ensure_repo_exists()
+        _ = client.ensure_repo_exists()
     assert posted_bodies, "should have POSTed a create-repo body"
     assert posted_bodies[0]["private"] is True, "repo should be created as private"
     print("  ✓ gitea: auto-created repo uses private=True")
@@ -1787,7 +1968,7 @@ def test_gitea_create_repo_404_then_409_private_collision():
 
     call_count = 0
 
-    def fake_urlopen(req):
+    def fake_urlopen(_req):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1798,7 +1979,7 @@ def test_gitea_create_repo_404_then_409_private_collision():
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
         try:
-            client.ensure_repo_exists()
+            _ = client.ensure_repo_exists()
             assert False, "should raise"
         except RuntimeError as e:
             msg = str(e)
@@ -1807,7 +1988,7 @@ def test_gitea_create_repo_404_then_409_private_collision():
     print("  ✓ gitea: 404 → 409 raises actionable private-repo-collision error")
 
 
-def test_gitea_verify_access_missing_repo_creates_it():
+def test_gitea_ensure_repo_exists_missing_repo_creates_it():
     """When the Gitea repo 404s, ensure_repo_exists should create it."""
     from gitacross.providers.gitea import GiteaClient
 
@@ -1817,7 +1998,7 @@ def test_gitea_verify_access_missing_repo_creates_it():
 
     call_count = 0
 
-    def fake_urlopen(req):
+    def fake_urlopen(_req):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1828,6 +2009,7 @@ def test_gitea_verify_access_missing_repo_creates_it():
 
     with mock.patch("gitacross.providers.base.urllib.request.urlopen", side_effect=fake_urlopen):
         result = client.ensure_repo_exists()
+    assert result is not None
     assert result["clone_url"] == repo_meta["clone_url"]
     print("  ✓ gitea: ensure_repo_exists auto-creates a missing repo")
 
@@ -1865,25 +2047,25 @@ def test_e2e_local_to_local():
 
         # ── Source repo: 2 tags, one ignored file ──
         src = tmp / "source"
-        _make_git_repo(src)
-        _make_file(src, "README.md", "# Project")
-        _make_file(src, ".env", "SECRET=1")
-        _make_file(src, "src/main.py", "print(1)")
+        _ = _make_git_repo(src)
+        _ = _make_file(src, "README.md", "# Project")
+        _ = _make_file(src, ".env", "SECRET=1")
+        _ = _make_file(src, "src/main.py", "print(1)")
         _git_commit(src, "first")
         _git_tag(src, "v1.0")
 
-        _make_file(src, "src/main.py", "print(2)")
-        _make_file(src, "CHANGELOG.md", "## v2")
+        _ = _make_file(src, "src/main.py", "print(2)")
+        _ = _make_file(src, "CHANGELOG.md", "## v2")
         _git_commit(src, "second")
         _git_tag(src, "v2.0")
 
         # ── Empty target repo ──
         tgt = tmp / "target"
-        _make_git_repo(tgt)
+        _ = _make_git_repo(tgt)
 
         # ── Config ──
         cfg = tmp / "config.yml"
-        cfg.write_text(f"""
+        _ = cfg.write_text(f"""
 - name: e2e
   source:
     type: local
@@ -1915,7 +2097,7 @@ def test_e2e_local_to_local():
             config = Config(str(cfg))
 
             # ── First run ──
-            sync_project(config.projects[0], ".", dry_run=False)
+            _ = sync_project(config.projects[0], ".", dry_run=False)
 
             # Target has expected files (latest release = v2.0)
             assert (tgt / "README.md").read_text() == "# Project"
@@ -1928,6 +2110,7 @@ def test_e2e_local_to_local():
             r = subprocess.run(
                 ["git", "-C", str(tgt), "tag", "-l"],
                 capture_output=True,
+                check=True,
                 text=True,
             )
             tags = r.stdout.strip().split()
@@ -1937,6 +2120,7 @@ def test_e2e_local_to_local():
             # Linear history: v1.0 is parent of v2.0
             r = subprocess.run(
                 ["git", "-C", str(tgt), "merge-base", "--is-ancestor", "v1.0", "v2.0"],
+                check=True,
             )
             assert r.returncode == 0, "v1.0 should be ancestor of v2.0"
 
@@ -1956,14 +2140,16 @@ def test_e2e_local_to_local():
             log_before = subprocess.run(
                 ["git", "-C", str(tgt), "rev-list", "--count", "HEAD"],
                 capture_output=True,
+                check=True,
                 text=True,
             ).stdout.strip()
 
-            sync_project(config.projects[0], ".", dry_run=False)
+            _ = sync_project(config.projects[0], ".", dry_run=False)
 
             log_after = subprocess.run(
                 ["git", "-C", str(tgt), "rev-list", "--count", "HEAD"],
                 capture_output=True,
+                check=True,
                 text=True,
             ).stdout.strip()
             assert log_before == log_after, "second run should not create new commits"
@@ -1995,12 +2181,12 @@ def test_git_repo_resolve_and_export_commit():
 
     with tempfile.TemporaryDirectory() as tmp:
         repo = Path(tmp) / "repo"
-        _make_git_repo(repo)
-        _make_file(repo, "version.txt", "v1.0")
+        _ = _make_git_repo(repo)
+        _ = _make_file(repo, "version.txt", "v1.0")
         _git_commit(repo, "c1")
         _git_tag(repo, "v1.0")
 
-        _make_file(repo, "version.txt", "v1.1-hotfix")
+        _ = _make_file(repo, "version.txt", "v1.1-hotfix")
         _git_commit(repo, "c2-hotfix")
 
         git = GitRepo.local(repo)
@@ -2030,8 +2216,8 @@ def test_git_repo_resolve_default_branch_head_mirror():
 
     with tempfile.TemporaryDirectory() as tmp:
         origin = Path(tmp) / "origin"
-        _make_git_repo(origin)
-        _make_file(origin, "file.txt", "hello")
+        _ = _make_git_repo(origin)
+        _ = _make_file(origin, "file.txt", "hello")
         _git_commit(origin, "init")
 
         mirror_path = Path(tmp) / "mirror.git"
@@ -2050,6 +2236,7 @@ def test_git_repo_resolve_default_branch_head_mirror():
 
 def test_source_resolves_commit_sha_and_export_release():
     from unittest import mock
+
     from gitacross.config import _EndpointConfig
     from gitacross.source import _RemoteSource
 
@@ -2106,7 +2293,6 @@ def test_source_resolves_commit_sha_and_export_release():
 
 
 def test_config_sync_assets():
-    import json
     from gitacross.config import Config
 
     yaml_text = """
@@ -2123,7 +2309,7 @@ projects:
     source:
       type: gitea
       repo: owner/r2
-      preserve_assets:
+      sync_assets:
         - "*.tar.gz"
         - "*.zip"
     target:
@@ -2138,7 +2324,7 @@ projects:
       repo: owner/r3
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     try:
@@ -2149,7 +2335,7 @@ projects:
     finally:
         os.unlink(path)
 
-    print("  ✓ config: sync_assets / preserve_assets")
+    print("  ✓ config: sync_assets")
 
 
 def test_matches_asset_filter():
@@ -2170,6 +2356,7 @@ def test_matches_asset_filter():
 
 def test_github_client_assets():
     import json
+
     from gitacross.providers.github import GitHubClient
 
     gh = GitHubClient("https://api.github.com", "owner/repo", "token123")
@@ -2182,13 +2369,14 @@ def test_github_client_assets():
 
     with mock.patch("urllib.request.urlopen", return_value=resp_mock) as m_open:
         rel = gh.get_release_by_tag("v1.0.0")
+        assert rel is not None
         assert rel["id"] == 42
         req = m_open.call_args[0][0]
         assert req.full_url == "https://api.github.com/repos/owner/repo/releases/tags/v1.0.0"
 
     # get_release_by_tag 404 returns None
     err = urllib.error.HTTPError(
-        url="url", code=404, msg="Not Found", hdrs={}, fp=io.BytesIO(b'{"message": "Not Found"}')
+        url="url", code=404, msg="Not Found", hdrs=email.message.Message(), fp=io.BytesIO(b'{"message": "Not Found"}')
     )
     with mock.patch("urllib.request.urlopen", side_effect=err):
         assert gh.get_release_by_tag("vmissing") is None
@@ -2229,7 +2417,7 @@ def test_github_client_assets():
     resp_up_mock.__enter__.return_value = resp_up_mock
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp_src:
-        tmp_src.write(b"app content bytes")
+        _ = tmp_src.write(b"app content bytes")
         tmp_src_path = Path(tmp_src.name)
 
     try:
@@ -2239,6 +2427,7 @@ def test_github_client_assets():
                 "upload_url": "https://uploads.github.com/repos/owner/repo/releases/42/assets{?name,label}",
             }
             res = gh.upload_asset(rel_dict, tmp_src_path, name="app.zip")
+            assert res is not None
             assert res["id"] == 102
             req = m_open.call_args[0][0]
             assert req.full_url == "https://uploads.github.com/repos/owner/repo/releases/42/assets?name=app.zip"
@@ -2247,7 +2436,7 @@ def test_github_client_assets():
 
         # 5. upload_asset 422 idempotent
         err422 = urllib.error.HTTPError(
-            url="url", code=422, msg="Unprocessable Entity", hdrs={}, fp=io.BytesIO(b'{"message": "already exists"}')
+            url="url", code=422, msg="Unprocessable Entity", hdrs=email.message.Message(), fp=io.BytesIO(b'{"message": "already exists"}')
         )
         with mock.patch("urllib.request.urlopen", side_effect=err422):
             res = gh.upload_asset(rel_dict, tmp_src_path, name="app.zip")
@@ -2260,6 +2449,7 @@ def test_github_client_assets():
 
 def test_gitea_client_assets():
     import json
+
     from gitacross.providers.gitea import GiteaClient
 
     gt = GiteaClient("https://gitea.example.com/api/v1", "owner/repo", "token456")
@@ -2272,13 +2462,14 @@ def test_gitea_client_assets():
 
     with mock.patch("urllib.request.urlopen", return_value=resp_mock) as m_open:
         rel = gt.get_release_by_tag("v1.0.0")
+        assert rel is not None
         assert rel["id"] == 7
         req = m_open.call_args[0][0]
         assert req.full_url == "https://gitea.example.com/api/v1/repos/owner/repo/releases/tags/v1.0.0"
 
     # get_release_by_tag 404 returns None
     err = urllib.error.HTTPError(
-        url="url", code=404, msg="Not Found", hdrs={}, fp=io.BytesIO(b'{"message": "Not Found"}')
+        url="url", code=404, msg="Not Found", hdrs=email.message.Message(), fp=io.BytesIO(b'{"message": "Not Found"}')
     )
     with mock.patch("urllib.request.urlopen", side_effect=err):
         assert gt.get_release_by_tag("vmissing") is None
@@ -2308,12 +2499,13 @@ def test_gitea_client_assets():
     resp_up_mock.__enter__.return_value = resp_up_mock
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp_src:
-        tmp_src.write(b"tar.gz content")
+        _ = tmp_src.write(b"tar.gz content")
         tmp_src_path = Path(tmp_src.name)
 
     try:
         with mock.patch("urllib.request.urlopen", return_value=resp_up_mock) as m_open:
             res = gt.upload_asset(7, tmp_src_path, name="binary.tar.gz")
+            assert res is not None
             assert res["id"] == 88
             req = m_open.call_args[0][0]
             assert "https://gitea.example.com/api/v1/repos/owner/repo/releases/7/assets?name=binary.tar.gz" in req.full_url
@@ -2323,7 +2515,7 @@ def test_gitea_client_assets():
 
         # 4. upload_asset 409 idempotent
         err409 = urllib.error.HTTPError(
-            url="url", code=409, msg="Conflict", hdrs={}, fp=io.BytesIO(b'{"message": "attachment already exists"}')
+            url="url", code=409, msg="Conflict", hdrs=email.message.Message(), fp=io.BytesIO(b'{"message": "attachment already exists"}')
         )
         with mock.patch("urllib.request.urlopen", side_effect=err409):
             res = gt.upload_asset(7, tmp_src_path, name="binary.tar.gz")
@@ -2414,7 +2606,7 @@ projects:
       token: github_secret
       branch: main
 """
-            Path("config.yml").write_text(cfg_yaml)
+            _ = Path("config.yml").write_text(cfg_yaml)
             config = Config("config.yml")
 
             # Mock source and target clients
@@ -2439,8 +2631,8 @@ projects:
                 [],
             ]
 
-            def _fake_download(asset, dest):
-                Path(dest).write_bytes(b"binary-data-prebuilt")
+            def _fake_download(_asset, dest):
+                _ = Path(dest).write_bytes(b"binary-data-prebuilt")
 
             mock_gitea.download_asset.side_effect = _fake_download
 
@@ -2459,15 +2651,14 @@ projects:
                 "2222222222222222222222222222222222222222"
             )
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch(
-                    "gitacross.git.GitRepo.ensure_mirror",
-                    return_value=mock_git,
-                ),
+            with mock.patch(
+                "gitacross.source.get_api_client", return_value=mock_gitea
+            ), mock.patch(
+                "gitacross.target.get_api_client", return_value=mock_github
+            ), mock.patch(
+                "gitacross.git.GitRepo.ensure_mirror", return_value=mock_git
             ):
-                sync_project(config.projects[0], ".", dry_run=False)
+                _ = sync_project(config.projects[0], ".", dry_run=False)
 
                 # Verify release was created
                 mock_github.create_release.assert_called_once_with(
@@ -2524,10 +2715,10 @@ projects:
     target:
       type: github
       repo: owner/r4
-      preserve_release_description: false
+      preserve_description: false
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     try:
@@ -2545,7 +2736,6 @@ projects:
 def test_sync_preserve_description_and_prerelease():
     from gitacross.config import Config
     from gitacross.main import sync_project
-    from gitacross.state import State
 
     yaml_text = """
 projects:
@@ -2560,7 +2750,7 @@ projects:
       repo: tgt/repo
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -2591,12 +2781,8 @@ projects:
             mock_git.tag_exists.return_value = False
             mock_git.head_sha.return_value = "bbbb" * 10
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-            ):
-                sync_project(cfg.projects[0], ".", dry_run=False)
+            with mock.patch("gitacross.source.get_api_client", return_value=mock_gitea), mock.patch("gitacross.target.get_api_client", return_value=mock_github), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git):
+                _ = sync_project(cfg.projects[0], ".", dry_run=False)
 
                 # Description should be empty because preserve_description is false.
                 # Prerelease should be True because the source was a prerelease.
@@ -2635,7 +2821,7 @@ projects:
     target: {type: github, repo: t/r}
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
     try:
         cfg = Config(path)
@@ -2656,7 +2842,6 @@ projects:
 def test_sync_commit_message_and_release_description_templates():
     from gitacross.config import Config
     from gitacross.main import sync_project
-    from gitacross.state import State
 
     yaml_text = """
 projects:
@@ -2671,7 +2856,7 @@ projects:
       repo: tgt/repo
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -2702,12 +2887,8 @@ projects:
             mock_git.tag_exists.return_value = False
             mock_git.head_sha.return_value = "abcdef1234567890abcdef1234567890abcdef12"
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-            ):
-                sync_project(cfg.projects[0], ".", dry_run=False)
+            with mock.patch("gitacross.source.get_api_client", return_value=mock_gitea), mock.patch("gitacross.target.get_api_client", return_value=mock_github), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git):
+                _ = sync_project(cfg.projects[0], ".", dry_run=False)
 
                 # Check custom commit message passed to commit
                 mock_git.commit.assert_called_once()
@@ -2732,7 +2913,6 @@ projects:
 def test_sync_tmpdir_os_path_and_cleanup():
     from gitacross.config import Config
     from gitacross.main import sync_project
-    from gitacross.state import State
 
     yaml_text = """
 projects:
@@ -2745,7 +2925,7 @@ projects:
       repo: tgt/repo
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -2783,13 +2963,8 @@ projects:
                 seen_tmpdirs.append(d)
                 return d
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-                mock.patch("tempfile.mkdtemp", side_effect=_track_mkdtemp),
-            ):
-                sync_project(cfg.projects[0], ".", dry_run=False)
+            with mock.patch("gitacross.source.get_api_client", return_value=mock_gitea), mock.patch("gitacross.target.get_api_client", return_value=mock_github), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git), mock.patch("tempfile.mkdtemp", side_effect=_track_mkdtemp):
+                _ = sync_project(cfg.projects[0], ".", dry_run=False)
 
             assert len(seen_tmpdirs) == 1
             temp_path = Path(seen_tmpdirs[0])
@@ -2869,11 +3044,11 @@ def test_reprs_are_informative():
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg_path = Path(tmp) / "config.yml"
-        cfg_path.write_text(
+        _ = cfg_path.write_text(
             "projects:\n"
-            "  - name: proj-a\n"
-            "    source: {type: local, path: /x}\n"
-            "    target: {type: local, path: /y}\n"
+            + "  - name: proj-a\n"
+            + "    source: {type: local, path: /x}\n"
+            + "    target: {type: local, path: /y}\n"
         )
         cfg = Config(str(cfg_path))
         proj = cfg.projects[0]
@@ -2921,6 +3096,7 @@ def test_provider_registry():
         assert "github" in str(e)
 
     # Test custom runtime registration
+    @final
     class CustomClient:
         def __init__(self, api, repo, token):
             self.api = api
@@ -2973,7 +3149,7 @@ projects:
       repo: o/r
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     try:
@@ -2994,7 +3170,7 @@ def test_gitea_multipart_reader_stream():
     file_content = b"streaming file chunk payload"
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(file_content)
+        _ = tmp.write(file_content)
         tmp_path = Path(tmp.name)
 
     try:
@@ -3013,6 +3189,7 @@ def test_gitea_multipart_reader_stream():
 
 def test_github_streaming_upload():
     import json
+
     from gitacross.providers.github import GitHubClient
 
     gh = GitHubClient("https://api.github.com", "owner/repo", "token123")
@@ -3022,13 +3199,14 @@ def test_github_streaming_upload():
     resp_mock.__enter__.return_value = resp_mock
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(b"huge asset content payload")
+        _ = tmp.write(b"huge asset content payload")
         tmp_path = Path(tmp.name)
 
     try:
         with mock.patch("urllib.request.urlopen", return_value=resp_mock) as m_open:
             rel_dict = {"id": 1, "upload_url": "https://uploads.github.com/repos/owner/repo/releases/1/assets{?name,label}"}
             res = gh.upload_asset(rel_dict, tmp_path, name="streamed.zip", stream=True)
+            assert res is not None
             assert res["id"] == 200
             req = m_open.call_args[0][0]
             assert req.headers["Content-length"] == str(len(b"huge asset content payload"))
@@ -3074,7 +3252,7 @@ def test_linter_unknown_operation():
 
 
 def test_linter_invalid_yaml():
-    from gitacross.linter import ConfigLinter, LintSeverity
+    from gitacross.linter import ConfigLinter
 
     linter = ConfigLinter()
     report = linter.lint_yaml_string("projects: [invalid yaml: {")
@@ -3106,7 +3284,7 @@ def test_linter_empty_entry_and_duplicate_names():
 
 
 def test_linter_missing_required_fields():
-    from gitacross.linter import ConfigLinter, LintSeverity
+    from gitacross.linter import ConfigLinter
 
     linter = ConfigLinter()
     report = linter.lint_yaml_string("""
@@ -3376,7 +3554,7 @@ def test_linter_cli_flag():
     from gitacross.linter import lint_config
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write("""
+        _ = f.write("""
 - name: test-app
   source:
     type: gitea
@@ -3402,7 +3580,8 @@ def test_linter_cli_flag():
 
 def test_config_fixer():
     import yaml
-    from gitacross.linter import ConfigFixer, fix_config, lint_config
+
+    from gitacross.linter import fix_config, lint_config
 
     raw_yaml = """
 - name: messy-app
@@ -3443,7 +3622,7 @@ def test_config_fixer():
             pattern: literal
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(raw_yaml)
+        _ = f.write(raw_yaml)
         config_path = f.name
 
     try:
@@ -3488,6 +3667,7 @@ def test_config_fixer():
 def test_config_fixer_vice_versa():
     """Test that options misplaced in source or target are moved to project level or correct endpoint."""
     import yaml
+
     from gitacross.linter import fix_config, lint_config
 
     raw_yaml = """
@@ -3511,7 +3691,7 @@ def test_config_fixer_vice_versa():
       backoff_seconds: 4
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(raw_yaml)
+        _ = f.write(raw_yaml)
         config_path = f.name
 
     try:
@@ -3574,7 +3754,7 @@ def test_sync_long_text_passthrough():
         "      repo: tgt/repo\n"
     )
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3605,12 +3785,8 @@ def test_sync_long_text_passthrough():
             mock_git.tag_exists.return_value = False
             mock_git.head_sha.return_value = "bbbb" * 10
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-            ):
-                sync_project(cfg.projects[0], ".", dry_run=False)
+            with mock.patch("gitacross.source.get_api_client", return_value=mock_gitea), mock.patch("gitacross.target.get_api_client", return_value=mock_github), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git):
+                _ = sync_project(cfg.projects[0], ".", dry_run=False)
 
                 # Full release body passed through untouched (no truncation)
                 mock_github.create_release.assert_called_once_with(
@@ -3646,7 +3822,7 @@ projects:
       backoff_seconds: 0
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write(yaml_text)
+        _ = f.write(yaml_text)
         path = f.name
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3677,13 +3853,9 @@ projects:
             mock_git.tag_exists.return_value = False
             mock_git.head_sha.return_value = "bbbb" * 10
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-            ):
+            with mock.patch("gitacross.source.get_api_client", return_value=mock_gitea), mock.patch("gitacross.target.get_api_client", return_value=mock_github), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git):
                 try:
-                    sync_project(cfg.projects[0], ".", dry_run=False)
+                    _ = sync_project(cfg.projects[0], ".", dry_run=False)
                     assert False, "should have raised"
                 except RuntimeError as e:
                     assert "release api down" in str(e)
@@ -3711,13 +3883,13 @@ def test_sync_project_skips_disabled():
     }
     project = ProjectConfig(raw)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, mock.patch(
+        "gitacross.main.create_source", side_effect=AssertionError("should not be called")
+    ), mock.patch(
+        "gitacross.main.create_target", side_effect=AssertionError("should not be called")
+    ):
         # Patch create_source / create_target to fail hard if called
-        with (
-            mock.patch("gitacross.main.create_source", side_effect=AssertionError("should not be called")),
-            mock.patch("gitacross.main.create_target", side_effect=AssertionError("should not be called")),
-        ):
-            sync_project(project, tmp)  # must not raise
+        _ = sync_project(project, tmp)  # must not raise
 
     print("  ✓ sync_project: skips disabled project without making any calls")
 
@@ -3738,14 +3910,14 @@ def _write_local_config(path, projects):
             f"    source:\n      type: local\n      path: {p.get('src', '/nonexistent')}\n",
             f"    target:\n      type: local\n      path: {p.get('tgt', '/nonexistent')}\n",
         ]
-    Path(path).write_text("".join(lines))
+    _ = Path(path).write_text("".join(lines))
 
 
 def test_run_raises_on_missing_config():
     import gitacross
 
     try:
-        gitacross.run("/nonexistent/path/config.yml")
+        _ = gitacross.run("/nonexistent/path/config.yml")
         assert False, "Should have raised FileNotFoundError"
     except FileNotFoundError as e:
         assert "config.yml" in str(e)
@@ -3757,11 +3929,11 @@ def test_run_raises_on_unknown_project():
     import gitacross
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
-        f.write("projects:\n  - name: alpha\n    source:\n      type: local\n      path: /x\n    target:\n      type: local\n      path: /y\n")
+        _ = f.write("projects:\n  - name: alpha\n    source:\n      type: local\n      path: /x\n    target:\n      type: local\n      path: /y\n")
         config_path = f.name
 
     try:
-        gitacross.run(config_path, project="nonexistent")
+        _ = gitacross.run(config_path, project="nonexistent")
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "nonexistent" in str(e)
@@ -3823,8 +3995,19 @@ def test_run_empty_config():
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "config.yml"
-        cfg.write_text("projects: []\n")
+        _ = cfg.write_text("projects: []\n")
         results = gitacross.run(str(cfg), work_dir=tmp)
+        assert results == []
+
+    # run() also accepts a Config instance or a stream — no file needed
+    with tempfile.TemporaryDirectory() as tmp:
+        from gitacross.config import Config
+
+        results = gitacross.run(
+            Config(io.StringIO("projects: []\n")), work_dir=tmp
+        )
+        assert results == []
+        results = gitacross.run(io.StringIO("projects: []\n"), work_dir=tmp)
         assert results == []
 
     print("  ✓ run: config with zero projects returns []")
@@ -3862,6 +4045,7 @@ def test_run_returns_synced_false_on_failure():
         call_count = {"n": 0}
 
         def _side_effect(proj, work_dir=None, dry_run=False, _state=None):
+            del work_dir, dry_run
             call_count["n"] += 1
             if proj.name == "proj-bad":
                 raise RuntimeError("boom")
@@ -3889,7 +4073,7 @@ def test_run_dry_run_passed_through():
         _write_local_config(cfg, [{"name": "proj-x"}])
 
         with mock.patch("gitacross.main.sync_project", return_value=[]) as mock_sync:
-            gitacross.run(str(cfg), dry_run=True, work_dir=tmp)
+            _ = gitacross.run(str(cfg), dry_run=True, work_dir=tmp)
 
         _, _, kwargs = mock_sync.mock_calls[0]
         assert kwargs.get("dry_run") is True
@@ -3949,15 +4133,15 @@ def test_releases_synced_count_e2e():
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "src_repo"
         tgt = Path(tmp) / "tgt_repo"
-        _make_git_repo(src)
-        _make_git_repo(tgt)
+        _ = _make_git_repo(src)
+        _ = _make_git_repo(tgt)
 
         # 2 tags in source repo
-        _make_file(src, "f1.txt", "v1.0")
+        _ = _make_file(src, "f1.txt", "v1.0")
         _git_commit(src, "c1")
         _git_tag(src, "v1.0")
 
-        _make_file(src, "f2.txt", "v2.0")
+        _ = _make_file(src, "f2.txt", "v2.0")
         _git_commit(src, "c2")
         _git_tag(src, "v2.0")
 
@@ -4000,7 +4184,7 @@ def test_releases_synced_count_e2e():
         assert res2[0]["synced"] is True
 
         # 4. Direct sync_project call on disabled project returns []
-        config = Config.from_path(str(cfg_path))
+        config = Config(str(cfg_path))
         config.projects[0].enabled = False
         releases = gitacross.sync_project(config.projects[0], work_dir=str(work_dir))
         assert releases == []
@@ -4011,8 +4195,6 @@ def test_releases_synced_count_e2e():
 def test_releases_detail_ordering_and_commit_mode():
     """Verify chronological ordering (oldest=head, newest=tail) and commit mode (tag=None)."""
     import gitacross
-    from gitacross.config import Config
-    from gitacross.state import State
 
     with tempfile.TemporaryDirectory() as tmp:
         old_cwd = os.getcwd()
@@ -4034,7 +4216,7 @@ projects:
       token: secret
       branch: main
 """
-            Path("config.yml").write_text(cfg_yaml)
+            _ = Path("config.yml").write_text(cfg_yaml)
 
             mock_gitea = mock.MagicMock()
             mock_github = mock.MagicMock()
@@ -4043,11 +4225,7 @@ projects:
             mock_git.tag_commit_date.return_value = "2026-08-22T10:00:00Z"
             mock_git.head_sha.return_value = "d" * 40
 
-            with (
-                mock.patch("gitacross.source.get_api_client", return_value=mock_gitea),
-                mock.patch("gitacross.target.get_api_client", return_value=mock_github),
-                mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git),
-            ):
+            with mock.patch("gitacross.source.get_api_client", return_value=mock_gitea), mock.patch("gitacross.target.get_api_client", return_value=mock_github), mock.patch("gitacross.git.GitRepo.ensure_mirror", return_value=mock_git):
                 res = gitacross.run("config.yml", work_dir=tmp)
 
             assert res[0]["synced"] is True
@@ -4077,7 +4255,7 @@ def test_run_reset_clears_work_dir(tmp_path):
     sentinel.write_text("should be gone")
 
     with mock.patch("gitacross.main.sync_project"):
-        gitacross.run(str(cfg), reset=True, work_dir=str(work_dir))
+        _ = gitacross.run(str(cfg), reset=True, work_dir=str(work_dir))
 
     # Wiped sentinel
     assert not sentinel.exists()
@@ -4097,10 +4275,7 @@ def test_main_exits_zero_on_success():
         cfg = Path(tmp) / "config.yml"
         _write_local_config(cfg, [{"name": "proj-ok"}])
 
-        with (
-            mock.patch("gitacross.main.sync_project", return_value=[]),
-            mock.patch("sys.argv", ["gitacross", "--config", str(cfg)]),
-        ):
+        with mock.patch("gitacross.main.sync_project", return_value=[]), mock.patch("sys.argv", ["gitacross", "--config", str(cfg)]):
             try:
                 main()
             except SystemExit as e:
@@ -4116,10 +4291,7 @@ def test_main_exits_nonzero_on_failure():
         cfg = Path(tmp) / "config.yml"
         _write_local_config(cfg, [{"name": "proj-bad"}])
 
-        with (
-            mock.patch("gitacross.main.sync_project", side_effect=RuntimeError("boom")),
-            mock.patch("sys.argv", ["gitacross", "--config", str(cfg)]),
-        ):
+        with mock.patch("gitacross.main.sync_project", side_effect=RuntimeError("boom")), mock.patch("sys.argv", ["gitacross", "--config", str(cfg)]):
             try:
                 main()
                 assert False, "main() should have called sys.exit"
@@ -4153,13 +4325,11 @@ def test_main_project_filter():
         synced = []
 
         def _capture(proj, work_dir=None, dry_run=False, _state=None):
+            del work_dir, dry_run
             synced.append(proj.name)
             return []
 
-        with (
-            mock.patch("gitacross.main.sync_project", side_effect=_capture),
-            mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--project", "beta"]),
-        ):
+        with mock.patch("gitacross.main.sync_project", side_effect=_capture), mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--project", "beta"]):
             try:
                 main()
             except SystemExit:
@@ -4182,13 +4352,11 @@ def test_main_workdir_flag():
         captured_paths = []
 
         def _capture(proj, work_dir=None, dry_run=False, _state=None):
+            del proj, dry_run
             captured_paths.append(str(work_dir))
             return []
 
-        with (
-            mock.patch("gitacross.main.sync_project", side_effect=_capture),
-            mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--workdir", str(custom_workdir)]),
-        ):
+        with mock.patch("gitacross.main.sync_project", side_effect=_capture), mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--workdir", str(custom_workdir)]):
             try:
                 main()
             except SystemExit:
@@ -4205,13 +4373,13 @@ def test_main_lint_flag():
 
     with tempfile.TemporaryDirectory() as tmp:
         good = Path(tmp) / "good.yml"
-        good.write_text(
+        _ = good.write_text(
             "projects:\n"
-            "  - name: ok\n"
-            "    source: {type: local, path: /x}\n"
-            "    target: {type: local, path: /y}\n"
+            + "  - name: ok\n"
+            + "    source: {type: local, path: /x}\n"
+            + "    target: {type: local, path: /y}\n"
         )
-        exited = {"code": None}
+        exited: dict[str, Any] = {"code": None}
         with mock.patch("sys.argv", ["gitacross", "--config", str(good), "--lint"]):
             try:
                 main()
@@ -4220,14 +4388,14 @@ def test_main_lint_flag():
         assert exited["code"] == 0
 
         bad = Path(tmp) / "bad.yml"
-        bad.write_text("projects: [invalid: {")
-        exited = {"code": None}
+        _ = bad.write_text("projects: [invalid: {")
+        exited_bad: dict[str, Any] = {"code": None}
         with mock.patch("sys.argv", ["gitacross", "--config", str(bad), "--lint"]):
             try:
                 main()
             except SystemExit as e:
-                exited["code"] = e.code
-        assert exited["code"] is not None and exited["code"] != 0
+                exited_bad["code"] = e.code
+        assert exited_bad["code"] is not None and exited_bad["code"] != 0
 
     print("  ✓ main: --lint exits 0 on valid config, non-zero on errors")
 
@@ -4238,19 +4406,19 @@ def test_main_fix_flag():
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "fixme.yml"
-        cfg.write_text(
+        _ = cfg.write_text(
             "projects:\n"
-            "  - name: p\n"
-            "    enabled: true\n"
-            "    source:\n"
-            "      type: local\n"
-            "      path: /x\n"
-            "      mode: release\n"
-            "    target:\n"
-            "      type: local\n"
-            "      path: /y\n"
+            + "  - name: p\n"
+            + "    enabled: true\n"
+            + "    source:\n"
+            + "      type: local\n"
+            + "      path: /x\n"
+            + "      mode: release\n"
+            + "    target:\n"
+            + "      type: local\n"
+            + "      path: /y\n"
         )
-        exited = {"code": None}
+        exited: dict[str, Any] = {"code": None}
         with mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--fix"]):
             try:
                 main()
@@ -4275,10 +4443,15 @@ if __name__ == "__main__":
     test_config_local()
     test_config_enabled()
     test_config_token_resolution()
+    test_config_from_file_object()
+    test_config_invalid_inputs()
+    test_run_input_forms_equivalent()
+    test_run_invalid_config_inputs()
+    test_lint_config_input_forms()
+    test_fix_config_missing_file()
     test_config_sync_assets()
     test_config_stream_assets()
     test_state()
-    test_state_migrates_old_id_keys()
     test_clean_text()
     test_matches_asset_filter()
     test_renderer_ignore()
@@ -4295,6 +4468,7 @@ if __name__ == "__main__":
     test_renderer_validate_case_insensitive()
     test_git_repo_local_tags()
     test_git_repo_export_tag()
+    test_git_repo_export_empty_tree()
     test_git_repo_commit_and_tag()
     test_git_repo_resolve_and_export_commit()
     test_git_repo_resolve_default_branch_head_mirror()
@@ -4313,16 +4487,16 @@ if __name__ == "__main__":
     test_retry_success()
     test_retry_failure()
     test_provider_registry()
-    test_github_verify_access_ok()
-    test_github_verify_access_missing_repo_creates_it()
-    test_github_verify_access_missing_repo_creates_it_org()
+    test_github_ensure_repo_exists_ok()
+    test_github_ensure_repo_exists_missing_repo_creates_it()
+    test_github_ensure_repo_exists_missing_repo_creates_it_org()
     test_github_create_repo_is_private()
     test_github_create_repo_404_then_422_private_collision()
-    test_github_verify_access_401_raises_directly()
-    test_gitea_verify_access_bad_token()
+    test_github_ensure_repo_exists_401_raises_directly()
+    test_gitea_ensure_repo_exists_bad_token()
     test_gitea_create_repo_is_private()
     test_gitea_create_repo_404_then_409_private_collision()
-    test_gitea_verify_access_missing_repo_creates_it()
+    test_gitea_ensure_repo_exists_missing_repo_creates_it()
     test_github_client_assets()
     test_github_streaming_upload()
     test_gitea_client_assets()

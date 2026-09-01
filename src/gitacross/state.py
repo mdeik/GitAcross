@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import final
 
 import yaml
 
 
+@final
 class State:
     """Persistent state tracking which releases have been synced.
 
@@ -27,31 +31,7 @@ class State:
                 data = yaml.safe_load(f) or {}
         else:
             data = {}
-        self._migrate_entries(data)
         return data
-
-    @staticmethod
-    def _migrate_entries(data):
-        """Re-key release entries by tag name and migrate field names."""
-        projects = data.get("projects") or {}
-        for project in projects.values():
-            releases = project.get("releases")
-            if not isinstance(releases, dict):
-                continue
-            for key, entry in list(releases.items()):
-                if not isinstance(entry, dict):
-                    continue
-                # Remove deprecated commit_sha
-                entry.pop("commit_sha", None)
-                # Rename published_at -> source_date
-                if "published_at" in entry and "source_date" not in entry:
-                    entry["source_date"] = entry.pop("published_at")
-                tag = entry.get("tag")
-                if not tag or str(key) == str(tag):
-                    continue
-                if str(tag) not in releases:
-                    releases[str(tag)] = entry
-                del releases[key]
 
     def has_release(self, project_name, tag_name):
         releases = (
@@ -70,4 +50,4 @@ class State:
         tmp = self.path.with_suffix(".tmp")
         with open(tmp, "w") as f:
             yaml.dump(self._data, f, default_flow_style=False)
-        tmp.replace(self.path)
+        _ = tmp.replace(self.path)
