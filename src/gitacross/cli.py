@@ -26,7 +26,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Sync releases from source to target")
     _ = parser.add_argument("--config", required=True, help="Path to config.yml")
-    _ = parser.add_argument("--project", help="Sync only this project (by name)")
+    _ = parser.add_argument("--project-name", help="Sync only this project (by name)")
     _ = parser.add_argument(
         "--dry-run", action="store_true", help="Print changes without pushing"
     )
@@ -58,7 +58,7 @@ def main():
     config_path = Path(cast(str, args.config))
     fix_flag = cast(bool, args.fix)
     lint_flag = cast(bool, args.lint)
-    project_filter = None if args.project is None else cast(str, args.project)
+    project_name = None if args.project_name is None else cast(str, args.project_name)
     dry_run_flag = cast(bool, args.dry_run)
     reset_flag = cast(bool, args.reset)
     workdir = cast(str, args.workdir)
@@ -92,7 +92,7 @@ def main():
     try:
         results = run(
             config_path,
-            project=project_filter,
+            project_name=project_name,
             dry_run=dry_run_flag,
             reset=reset_flag,
             work_dir=workdir,

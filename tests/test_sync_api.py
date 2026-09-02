@@ -208,7 +208,7 @@ def test_run_raises_on_unknown_project():
         config_path = f.name
 
     try:
-        _ = gitacross.run(config_path, project="nonexistent")
+        _ = gitacross.run(config_path, project_name="nonexistent")
         assert False, "Should have raised ValueError"
     except ValueError as e:
         assert "nonexistent" in str(e)
@@ -242,8 +242,8 @@ def test_run_skips_disabled_projects():
     print("  ✓ run: disabled projects are excluded from results and not synced")
 
 
-def test_run_project_filter():
-    """run(project='name') syncs only the named project."""
+def test_run_project_name_filter():
+    """run(project_name='name') syncs only the named project."""
     import gitacross
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -254,14 +254,14 @@ def test_run_project_filter():
         ])
 
         with mock.patch("gitacross.main.sync_project") as mock_sync:
-            results = gitacross.run(str(cfg), project="proj-b", work_dir=tmp)
+            results = gitacross.run(str(cfg), project_name="proj-b", work_dir=tmp)
 
         assert len(results) == 1
         assert results[0]["project"] == "proj-b"
         assert mock_sync.call_count == 1
         assert mock_sync.call_args[0][0].name == "proj-b"
 
-    print("  ✓ run: project= filter syncs only the named project")
+    print("  ✓ run: project_name= filter syncs only the named project")
 
 
 def test_run_empty_config():
@@ -700,8 +700,8 @@ def test_main_exits_nonzero_on_missing_config():
     print("  ✓ main: exits non-zero when config file is missing")
 
 
-def test_main_project_filter():
-    """--project flag must reach run() correctly."""
+def test_main_project_name_filter():
+    """--project-name flag must reach run() correctly."""
     from gitacross.main import main
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -715,7 +715,7 @@ def test_main_project_filter():
             synced.append(proj.name)
             return []
 
-        with mock.patch("gitacross.main.sync_project", side_effect=_capture), mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--project", "beta"]):
+        with mock.patch("gitacross.main.sync_project", side_effect=_capture), mock.patch("sys.argv", ["gitacross", "--config", str(cfg), "--project-name", "beta"]):
             try:
                 main()
             except SystemExit:
@@ -723,7 +723,7 @@ def test_main_project_filter():
 
         assert synced == ["beta"]
 
-    print("  ✓ main: --project flag syncs only the named project")
+    print("  ✓ main: --project-name flag syncs only the named project")
 
 
 def test_main_workdir_flag():

@@ -21,13 +21,13 @@ class LintSeverity(Enum):
 class LintIssue:
     severity: LintSeverity
     message: str
-    project: str | None = None
+    project_name: str | None = None
     key: str | None = None
 
     def __str__(self) -> str:
         prefix = f"[{self.severity.value}]"
-        if self.project:
-            return f"  {prefix} (project '{self.project}'): {self.message}"
+        if self.project_name:
+            return f"  {prefix} (project '{self.project_name}'): {self.message}"
         return f"  {prefix} {self.message}"
 
 
@@ -63,7 +63,7 @@ class LintReport:
         # Group issues by project (None first)
         by_proj: dict[str | None, list[LintIssue]] = {}
         for issue in self.issues:
-            by_proj.setdefault(issue.project, []).append(issue)
+            by_proj.setdefault(issue.project_name, []).append(issue)
 
         if None in by_proj:
             for issue in by_proj[None]:
@@ -98,11 +98,11 @@ _CleanDumper.add_representer(str, _str_presenter)
 @dataclass
 class FixIssue:
     message: str
-    project: str | None = None
+    project_name: str | None = None
 
     def __str__(self) -> str:
-        if self.project:
-            return f"  ✓ (project '{self.project}'): {self.message}"
+        if self.project_name:
+            return f"  ✓ (project '{self.project_name}'): {self.message}"
         return f"  ✓ {self.message}"
 
 
@@ -121,7 +121,7 @@ class FixReport:
         out = [f"Applied {len(self.fixes)} fix(es):"]
         by_proj: dict[str | None, list[FixIssue]] = {}
         for fix in self.fixes:
-            by_proj.setdefault(fix.project, []).append(fix)
+            by_proj.setdefault(fix.project_name, []).append(fix)
 
         if None in by_proj:
             for fix in by_proj[None]:

@@ -22,10 +22,7 @@ VALID_PROJECT_KEYS = {
     "sync_assets",
     "stream_assets",
     "commit_message",
-    "commit_template",
     "release_description",
-    "release_notes_template",
-    "description_template",
 }
 
 KNOWN_SOURCE_KEYS = {
@@ -256,15 +253,10 @@ class ProjectConfig:
         self.stream_assets = bool(raw.get("stream_assets", False))
 
         # commit_message — project-level commit message template (e.g. "chore(sync): {tag}")
-        self.commit_message = raw.get("commit_message") or raw.get("commit_template") or None
+        self.commit_message = raw.get("commit_message") or None
 
         # release_description — project-level release description template
-        self.release_description = (
-            raw.get("release_description")
-            or raw.get("release_notes_template")
-            or raw.get("description_template")
-            or None
-        )
+        self.release_description = raw.get("release_description") or None
 
     def __repr__(self):
         return (
@@ -309,9 +301,8 @@ def _cascade(raw_project, raw_source, raw_target, keys, default):
     """Return the first value found for any of *keys* across project, source, target.
 
     Lookup order: project-level first (highest priority), then source-level,
-    then target-level, then *default*.  All alias keys are checked at each
-    level before moving to the next — so a project-level alias wins over a
-    source-level primary key.
+    then target-level, then *default*. The first *key* present at the first
+    level wins — so a project-level value beats a source-level one.
     """
     for raw in (raw_project, raw_source, raw_target):
         for k in keys:

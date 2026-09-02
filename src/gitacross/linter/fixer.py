@@ -18,8 +18,8 @@ class ConfigFixer:
     def __repr__(self):
         return f"ConfigFixer(fixes={len(self.fixes)})"
 
-    def _add(self, message: str, project: str | None = None):
-        self.fixes.append(FixIssue(message=message, project=project))
+    def _add(self, message: str, project_name: str | None = None):
+        self.fixes.append(FixIssue(message=message, project_name=project_name))
 
     def fix_yaml_string(self, content: str) -> FixReport:
         # Fresh accumulator — reusing an instance must not leak prior fixes
@@ -68,12 +68,12 @@ class ConfigFixer:
                     p["source"][k] = val
                     self._add(
                         f"Moved '{k}: {val}' from project level into 'source:'",
-                        project=p_name,
+                        project_name=p_name,
                     )
                 else:
                     self._add(
                         f"Removed duplicate project-level '{k}' (already present under source)",
-                        project=p_name,
+                        project_name=p_name,
                     )
 
         # 2. Misplaced project-level keys inside source -> move to project level
@@ -85,12 +85,12 @@ class ConfigFixer:
                         p[k] = val
                         self._add(
                             f"Moved '{k}' from 'source:' to project level",
-                            project=p_name,
+                            project_name=p_name,
                         )
                     else:
                         self._add(
                             f"Removed duplicate '{k}' from 'source:' (already present at project level)",
-                            project=p_name,
+                            project_name=p_name,
                         )
 
         # 3. Misplaced project keys in target -> move to project level
@@ -103,12 +103,12 @@ class ConfigFixer:
                         p[k] = val
                         self._add(
                             f"Moved '{k}' from 'target:' to project level",
-                            project=p_name,
+                            project_name=p_name,
                         )
                     else:
                         self._add(
                             f"Removed duplicate '{k}' from 'target:' (already present at project level)",
-                            project=p_name,
+                            project_name=p_name,
                         )
                 elif k in KNOWN_SOURCE_KEYS:
                     val = p["target"].pop(k)
@@ -118,32 +118,32 @@ class ConfigFixer:
                         p["source"][k] = val
                         self._add(
                             f"Moved '{k}: {val}' from 'target:' into 'source:'",
-                            project=p_name,
+                            project_name=p_name,
                         )
                     else:
                         self._add(
                             f"Removed duplicate '{k}' from 'target:' (already present under source)",
-                            project=p_name,
+                            project_name=p_name,
                         )
 
         # 4. Redundant project-level options
         if p.get("enabled") is True:
             del p["enabled"]
-            self._add("Removed redundant 'enabled: true'", project=p_name)
+            self._add("Removed redundant 'enabled: true'", project_name=p_name)
 
         for key in ("preserve_description",):
             if p.get(key) is True:
                 del p[key]
-                self._add(f"Removed redundant '{key}: true'", project=p_name)
+                self._add(f"Removed redundant '{key}: true'", project_name=p_name)
 
         for key in ("sync_assets",):
             if p.get(key) is False:
                 del p[key]
-                self._add(f"Removed redundant '{key}: false'", project=p_name)
+                self._add(f"Removed redundant '{key}: false'", project_name=p_name)
 
         if p.get("stream_assets") is False:
             del p["stream_assets"]
-            self._add("Removed redundant 'stream_assets: false'", project=p_name)
+            self._add("Removed redundant 'stream_assets: false'", project_name=p_name)
 
         # 3. Source endpoint fixes
         if isinstance(p.get("source"), dict):
@@ -151,31 +151,31 @@ class ConfigFixer:
             if src.get("mode") == "release":
                 del src["mode"]
                 self._add(
-                    "Removed redundant 'source.mode: release'", project=p_name
+                    "Removed redundant 'source.mode: release'", project_name=p_name
                 )
             if src.get("include_prereleases") is False:
                 del src["include_prereleases"]
                 self._add(
                     "Removed redundant 'source.include_prereleases: false'",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if src.get("include_drafts") is False:
                 del src["include_drafts"]
                 self._add(
                     "Removed redundant 'source.include_drafts: false'",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if src.get("sync_from") == "":
                 del src["sync_from"]
                 self._add(
                     "Removed redundant 'source.sync_from: \"\"'",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if src.get("tag_pattern") == "*":
                 del src["tag_pattern"]
                 self._add(
                     "Removed redundant 'source.tag_pattern: \"*\"'",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         # 4. Target endpoint fixes
@@ -184,7 +184,7 @@ class ConfigFixer:
             if tgt.get("branch") == "main":
                 del tgt["branch"]
                 self._add(
-                    "Removed redundant 'target.branch: main'", project=p_name
+                    "Removed redundant 'target.branch: main'", project_name=p_name
                 )
 
         # 5. Retry fixes
@@ -198,11 +198,11 @@ class ConfigFixer:
                 del p["retry"]
                 self._add(
                     "Removed default 'retry' configuration block",
-                    project=p_name,
+                    project_name=p_name,
                 )
             else:
                 self._add(
-                    "Removed redundant retry defaults", project=p_name
+                    "Removed redundant retry defaults", project_name=p_name
                 )
 
         # 6. Renderer fixes
@@ -221,20 +221,20 @@ class ConfigFixer:
                                     del item["pattern"]
                                     self._add(
                                         f"Removed redundant 'pattern: literal' in {op_type} operation",
-                                        project=p_name,
+                                        project_name=p_name,
                                     )
                                 if op_type == "replace":
                                     if item.get("case_sensitive") is True:
                                         del item["case_sensitive"]
                                         self._add(
                                             "Removed redundant 'case_sensitive: true' in replace operation",
-                                            project=p_name,
+                                            project_name=p_name,
                                         )
                                     if item.get("match_case") is False:
                                         del item["match_case"]
                                         self._add(
                                             "Removed redundant 'match_case: false' in replace operation",
-                                            project=p_name,
+                                            project_name=p_name,
                                         )
                                 if op_type == "validate" and item.get(
                                     "case_sensitive"
@@ -242,7 +242,7 @@ class ConfigFixer:
                                     del item["case_sensitive"]
                                     self._add(
                                         "Removed redundant 'case_sensitive: true' in validate operation",
-                                        project=p_name,
+                                        project_name=p_name,
                                     )
 
 
