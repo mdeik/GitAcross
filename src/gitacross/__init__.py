@@ -8,13 +8,13 @@ Quickstart (Python API)::
     results = gitacross.run("config.yml")
 
     # Sync a single project with dry-run mode:
-    results = gitacross.run("config.yml", project="my-mirror", dry_run=True)
+    results = gitacross.run("config.yml", project_name="my-mirror", dry_run=True)
 
     # Lower-level: build objects yourself for full control:
     config = gitacross.Config("config.yml")
-    for project in config.projects:
-        if project.enabled:
-            gitacross.sync_project(project, ".gitsync")
+    for project_config in config.projects:
+        if project_config.enabled:
+            gitacross.sync_project(project_config, ".gitsync")
 
     # Lint / fix a config file:
     report = gitacross.lint_config("config.yml")

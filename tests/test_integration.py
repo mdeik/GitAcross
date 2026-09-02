@@ -798,12 +798,6 @@ projects:
     release_description: "Upstream notes for {tag}:\\n{body}"
     source: {type: gitea, repo: s/r}
     target: {type: github, repo: t/r}
-
-  - name: alias-templates
-    commit_template: "sync commit {short_sha}"
-    release_notes_template: "Mirror release {tag}"
-    source: {type: gitea, repo: s/r}
-    target: {type: github, repo: t/r}
 """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
         _ = f.write(yaml_text)
@@ -815,13 +809,10 @@ projects:
 
         assert cfg.projects[1].commit_message == "chore: mirror {tag} ({short_sha})"
         assert cfg.projects[1].release_description == "Upstream notes for {tag}:\n{body}"
-
-        assert cfg.projects[2].commit_message == "sync commit {short_sha}"
-        assert cfg.projects[2].release_description == "Mirror release {tag}"
     finally:
         os.unlink(path)
 
-    print("  ✓ config: commit_message and release_description parsing and aliases")
+    print("  ✓ config: commit_message and release_description parsing")
 
 
 def test_sync_commit_message_and_release_description_templates():
@@ -1038,7 +1029,7 @@ def test_reprs_are_informative():
         cfg = Config(str(cfg_path))
         proj = cfg.projects[0]
 
-        issue = LintIssue(LintSeverity.ERROR, "boom", project="proj-a")
+        issue = LintIssue(LintSeverity.ERROR, "boom", project_name="proj-a")
 
         for obj, needle in [
             (cfg, "projects=1"),

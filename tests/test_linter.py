@@ -122,7 +122,7 @@ def test_lint_issue_and_report_formatting():
     assert "[ERROR] boom" in str(issue_plain)
 
     issue_proj = LintIssue(
-        severity=LintSeverity.WARNING, message="careful", project="p1"
+        severity=LintSeverity.WARNING, message="careful", project_name="p1"
     )
     assert "(project 'p1')" in str(issue_proj)
 
@@ -880,7 +880,7 @@ def test_fix_report_and_issue_formatting():
     from gitacross.linter import FixIssue, FixReport
 
     assert str(FixIssue("m")) == "  ✓ m"
-    assert str(FixIssue("m", project="p")) == "  ✓ (project 'p'): m"
+    assert str(FixIssue("m", project_name="p")) == "  ✓ (project 'p'): m"
     assert (
         FixReport([], "", True).format_text()
         == "No fixes needed. Config is already clean and optimal."
@@ -888,7 +888,7 @@ def test_fix_report_and_issue_formatting():
     assert FixReport([], "", False, error="boom").format_text() == (
         "[ERROR] Could not fix configuration: boom"
     )
-    text = FixReport([FixIssue("a"), FixIssue("b", project="p")], "x", True).format_text()
+    text = FixReport([FixIssue("a"), FixIssue("b", project_name="p")], "x", True).format_text()
     assert "  ✓ a" in text and "Project 'p'" in text
     print("  ✓ fixer: FixIssue/FixReport formatting variants")
 
@@ -1028,3 +1028,4 @@ def test_fixer_missing_endpoint_sections():
         + "  target: {type: local, path: /b}\n"
     ).is_valid
     print("  ✓ fixer: missing endpoint sections and junk operations handled")
+

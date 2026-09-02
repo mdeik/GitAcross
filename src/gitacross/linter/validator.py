@@ -30,11 +30,16 @@ class ConfigLinter:
         self,
         severity: LintSeverity,
         message: str,
-        project: str | None = None,
+        project_name: str | None = None,
         key: str | None = None,
     ):
         self.issues.append(
-            LintIssue(severity=severity, message=message, project=project, key=key)
+            LintIssue(
+                severity=severity,
+                message=message,
+                project_name=project_name,
+                key=key,
+            )
         )
 
     def lint_file(
@@ -138,7 +143,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"Duplicate project name '{name}' found.",
-                    project=p_name,
+                    project_name=p_name,
                 )
             seen_names.add(name)
 
@@ -150,21 +155,21 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'{k}: {value}' was specified at project level, but belongs under 'source:' (e.g. source.{k}: {value}).",
-                    project=p_name,
+                    project_name=p_name,
                     key=k,
                 )
             elif k in KNOWN_ENDPOINT_KEYS:
                 self._add(
                     LintSeverity.ERROR,
                     f"'{k}: {value}' was specified at project level, but belongs under '{KNOWN_ENDPOINT_KEYS[k]}:'.",
-                    project=p_name,
+                    project_name=p_name,
                     key=k,
                 )
             else:
                 self._add(
                     LintSeverity.WARNING,
                     f"Unrecognized project-level option '{k}'.",
-                    project=p_name,
+                    project_name=p_name,
                     key=k,
                 )
 
@@ -175,14 +180,14 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'enabled' must be a boolean (got {type(val).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                     key="enabled",
                 )
             elif val is True:
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'enabled: true' is redundant (default is true).",
-                    project=p_name,
+                    project_name=p_name,
                     key="enabled",
                 )
 
@@ -192,13 +197,13 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'preserve_description' must be a boolean (got {type(val).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             elif val is True:
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'preserve_description: true' is redundant (default is true).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if "sync_assets" in p:
@@ -208,7 +213,7 @@ class ConfigLinter:
                     self._add(
                         LintSeverity.REDUNDANT,
                         "'sync_assets: false' is redundant (default is false).",
-                        project=p_name,
+                        project_name=p_name,
                     )
             elif isinstance(val, str):
                 pass
@@ -217,13 +222,13 @@ class ConfigLinter:
                     self._add(
                         LintSeverity.ERROR,
                         "'sync_assets' list must only contain string glob patterns.",
-                        project=p_name,
+                        project_name=p_name,
                     )
             else:
                 self._add(
                     LintSeverity.ERROR,
                     f"'sync_assets' must be a boolean, string, or list of strings (got {type(val).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if "stream_assets" in p:
@@ -232,34 +237,23 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'stream_assets' must be a boolean (got {type(val).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             elif val is False:
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'stream_assets: false' is redundant (default is false).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
-        for key in ("commit_message", "commit_template"):
+        for key in ("commit_message", "release_description"):
             if key in p:
                 val = p[key]
                 if not isinstance(val, str):
                     self._add(
                         LintSeverity.ERROR,
                         f"'{key}' must be a string (got {type(val).__name__}).",
-                        project=p_name,
-                        key=key,
-                    )
-
-        for key in ("release_description", "release_notes_template", "description_template"):
-            if key in p:
-                val = p[key]
-                if not isinstance(val, str):
-                    self._add(
-                        LintSeverity.ERROR,
-                        f"'{key}' must be a string (got {type(val).__name__}).",
-                        project=p_name,
+                        project_name=p_name,
                         key=key,
                     )
 
@@ -269,13 +263,13 @@ class ConfigLinter:
             self._add(
                 LintSeverity.ERROR,
                 "Missing required 'source' endpoint configuration.",
-                project=p_name,
+                project_name=p_name,
             )
         elif not isinstance(source, dict):
             self._add(
                 LintSeverity.ERROR,
                 f"'source' must be a dictionary (got {type(source).__name__}).",
-                project=p_name,
+                project_name=p_name,
             )
         else:
             self._lint_source(source, p_name)
@@ -286,13 +280,13 @@ class ConfigLinter:
             self._add(
                 LintSeverity.ERROR,
                 "Missing required 'target' endpoint configuration.",
-                project=p_name,
+                project_name=p_name,
             )
         elif not isinstance(target, dict):
             self._add(
                 LintSeverity.ERROR,
                 f"'target' must be a dictionary (got {type(target).__name__}).",
-                project=p_name,
+                project_name=p_name,
             )
         else:
             self._lint_target(target, p_name)
@@ -304,7 +298,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'retry' must be a dictionary (got {type(retry).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             else:
                 self._lint_retry(retry, p_name)
@@ -316,7 +310,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'renderer' must be a dictionary (got {type(renderer).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             else:
                 self._lint_renderer(renderer, p_name)
@@ -328,7 +322,7 @@ class ConfigLinter:
                 LintSeverity.ERROR,
                 f"Invalid source type '{src_type}'. "
                 + f"Expected one of {sorted(ENDPOINT_TYPES)}.",
-                project=p_name,
+                project_name=p_name,
             )
             return
 
@@ -339,14 +333,14 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.WARNING,
                     f"'{k}' was specified inside 'source:', but belongs at the project level.",
-                    project=p_name,
+                    project_name=p_name,
                     key=k,
                 )
             elif k not in valid_keys:
                 self._add(
                     LintSeverity.WARNING,
                     f"Unrecognized option '{k}' under source ({src_type}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if is_remote:
@@ -354,19 +348,19 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     "Source is missing required 'repo' string (e.g. 'owner/repo').",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if not s.get("api"):
                 self._add(
                     LintSeverity.ERROR,
                     "Source is missing required 'api' URL.",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if not s.get("token"):
                 self._add(
                     LintSeverity.ERROR,
                     "Source is missing required 'token'.",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
             mode = s.get("mode", "release")
@@ -374,13 +368,13 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"Invalid source mode '{mode}'. Expected 'release', 'tag', or 'commit'.",
-                    project=p_name,
+                    project_name=p_name,
                 )
             elif "mode" in s and s["mode"] == "release":
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'source.mode: release' is redundant (default is release).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
             if "include_prereleases" in s:
@@ -389,13 +383,13 @@ class ConfigLinter:
                     self._add(
                         LintSeverity.ERROR,
                         f"'source.include_prereleases' must be a boolean (got {type(val).__name__}).",
-                        project=p_name,
+                        project_name=p_name,
                     )
                 elif val is False:
                     self._add(
                         LintSeverity.REDUNDANT,
                         "'source.include_prereleases: false' is redundant (default is false).",
-                        project=p_name,
+                        project_name=p_name,
                     )
 
             if "include_drafts" in s:
@@ -404,20 +398,20 @@ class ConfigLinter:
                     self._add(
                         LintSeverity.ERROR,
                         f"'source.include_drafts' must be a boolean (got {type(val).__name__}).",
-                        project=p_name,
+                        project_name=p_name,
                     )
                 elif val is False:
                     self._add(
                         LintSeverity.REDUNDANT,
                         "'source.include_drafts: false' is redundant (default is false).",
-                        project=p_name,
+                        project_name=p_name,
                     )
 
             if "sync_from" in s and s["sync_from"] == "":
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'source.sync_from: \"\"' is redundant (default is empty).",
-                    project=p_name,
+                    project_name=p_name,
                 )
         else:
             # Local source
@@ -425,13 +419,13 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     "Local source is missing required 'path'.",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if "tag_pattern" in s and s["tag_pattern"] == "*":
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'source.tag_pattern: \"*\"' is redundant (default is \"*\").",
-                        project=p_name,
+                        project_name=p_name,
                     )
 
     def _lint_target(self, t: dict[str, Any], p_name: str):
@@ -441,7 +435,7 @@ class ConfigLinter:
                 LintSeverity.ERROR,
                 f"Invalid target type '{tgt_type}'. "
                 + f"Expected one of {sorted(ENDPOINT_TYPES)}.",
-                project=p_name,
+                project_name=p_name,
             )
             return
 
@@ -452,21 +446,21 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.WARNING,
                     f"'{k}' was specified inside 'target:', but belongs at the project level.",
-                    project=p_name,
+                    project_name=p_name,
                     key=k,
                 )
             elif k in KNOWN_SOURCE_KEYS:
                 self._add(
                     LintSeverity.ERROR,
                     f"'{k}' was specified inside 'target:', but belongs under 'source:'.",
-                    project=p_name,
+                    project_name=p_name,
                     key=k,
                 )
             elif k not in valid_keys:
                 self._add(
                     LintSeverity.WARNING,
                     f"Unrecognized option '{k}' under target ({tgt_type}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if is_remote:
@@ -474,26 +468,26 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     "Target is missing required 'repo' string (e.g. 'owner/repo').",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if not t.get("api"):
                 self._add(
                     LintSeverity.ERROR,
                     "Target is missing required 'api' URL.",
-                    project=p_name,
+                    project_name=p_name,
                 )
             if not t.get("token"):
                 self._add(
                     LintSeverity.ERROR,
                     "Target is missing required 'token'.",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if "branch" in t and t["branch"] == "main":
             self._add(
                 LintSeverity.REDUNDANT,
                 "'target.branch: main' is redundant (default is main).",
-                project=p_name,
+                project_name=p_name,
             )
 
     def _lint_retry(self, r: dict[str, Any], p_name: str):
@@ -503,7 +497,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.WARNING,
                     f"Unrecognized option '{k}' under retry.",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         max_att = r.get("max_attempts")
@@ -514,13 +508,13 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'retry.max_attempts' must be an integer >= 1 (got {max_att}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             elif max_att == 3:
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'retry.max_attempts: 3' is redundant (default is 3).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if backoff is not None:
@@ -528,13 +522,13 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'retry.backoff_seconds' must be a number >= 0 (got {backoff}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             elif backoff == 2:
                 self._add(
                     LintSeverity.REDUNDANT,
                     "'retry.backoff_seconds: 2' is redundant (default is 2).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
     def _lint_renderer(self, ren: dict[str, Any], p_name: str):
@@ -544,7 +538,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.WARNING,
                     f"Unrecognized option '{k}' under renderer.",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if "ignore" in ren:
@@ -553,7 +547,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'renderer.ignore' must be a list of patterns (got {type(ig).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if "author" in ren:
@@ -562,7 +556,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'renderer.author' must be a dictionary (got {type(auth).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
 
         if "operations" in ren:
@@ -571,7 +565,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"'renderer.operations' must be a list of operation maps (got {type(ops).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
             else:
                 self._lint_operations(ops, p_name)
@@ -583,7 +577,7 @@ class ConfigLinter:
                 self._add(
                     LintSeverity.ERROR,
                     f"Operation at index {idx} must be a dictionary (got {type(op).__name__}).",
-                    project=p_name,
+                    project_name=p_name,
                 )
                 continue
             for op_type, items in op.items():
@@ -591,14 +585,14 @@ class ConfigLinter:
                     self._add(
                         LintSeverity.ERROR,
                         f"Unknown renderer operation '{op_type}' at index {idx}. Valid operations: {', '.join(sorted(valid_op_types))}.",
-                        project=p_name,
+                        project_name=p_name,
                     )
                     continue
                 if not isinstance(items, list):
                     self._add(
                         LintSeverity.ERROR,
                         f"Renderer operation '{op_type}' must contain a list of actions.",
-                        project=p_name,
+                        project_name=p_name,
                     )
                     continue
 
@@ -608,20 +602,20 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 "Remove operation item requires 'path'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         pat = item.get("pattern")
                         if pat == "literal":
                             self._add(
                                 LintSeverity.REDUNDANT,
                                 "'pattern: literal' in remove operation is redundant (default is literal).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         elif pat and pat not in ("literal", "glob", "regex"):
                             self._add(
                                 LintSeverity.ERROR,
                                 f"Invalid remove pattern mode '{pat}'. Expected 'literal', 'glob', or 'regex'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
 
                 elif op_type == "rename":
@@ -634,20 +628,20 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 "Rename operation item requires 'from' and 'to'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         pat = item.get("pattern")
                         if pat == "literal":
                             self._add(
                                 LintSeverity.REDUNDANT,
                                 "'pattern: literal' in rename operation is redundant (default is literal).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         elif pat and pat != "literal":
                             self._add(
                                 LintSeverity.ERROR,
                                 f"Rename pattern mode '{pat}' is not supported — only 'literal' is supported.",
-                                project=p_name,
+                                project_name=p_name,
                             )
 
                 elif op_type == "replace":
@@ -660,7 +654,7 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 "Replace operation item requires 'search' and 'replace'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if not isinstance(item, dict):
                             continue
@@ -669,32 +663,32 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.REDUNDANT,
                                 "'pattern: literal' in replace operation is redundant (default is literal).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         elif pat and pat not in ("literal", "regex"):
                             self._add(
                                 LintSeverity.ERROR,
                                 f"Invalid replace pattern mode '{pat}'. Expected 'literal' or 'regex'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if item.get("case_sensitive") is True:
                             self._add(
                                 LintSeverity.REDUNDANT,
                                 "'case_sensitive: true' in replace operation is redundant (default is true).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if item.get("match_case") is False:
                             self._add(
                                 LintSeverity.REDUNDANT,
                                 "'match_case: false' in replace operation is redundant (default is false).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         for key in ("case_sensitive", "match_case"):
                             if key in item and not isinstance(item[key], bool):
                                 self._add(
                                     LintSeverity.ERROR,
                                     f"Replace option '{key}' must be a boolean (true/false).",
-                                    project=p_name,
+                                    project_name=p_name,
                                 )
 
                 elif op_type == "add":
@@ -707,7 +701,7 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 "Add operation item requires 'path' and 'content'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
 
                 elif op_type == "validate":  # pragma: no branch — reaching here implies validate (dead false-arc)
@@ -722,7 +716,7 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 "Validate operation item requires 'path'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if not isinstance(item, dict):
                             continue
@@ -731,7 +725,7 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 f"Invalid validate assert '{asrt}'. Expected one of {', '.join(sorted(valid_asserts))}.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if asrt in ("string_exists", "string_absent") and not item.get(
                             "pattern"
@@ -739,13 +733,13 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 f"Validate assert '{asrt}' requires 'pattern'.",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if item.get("case_sensitive") is True:
                             self._add(
                                 LintSeverity.REDUNDANT,
                                 "'case_sensitive: true' in validate operation is redundant (default is true).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if "case_sensitive" in item and not isinstance(
                             item["case_sensitive"], bool
@@ -753,7 +747,7 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.ERROR,
                                 "Validate option 'case_sensitive' must be a boolean (true/false).",
-                                project=p_name,
+                                project_name=p_name,
                             )
                         if asrt not in ("string_exists", "string_absent") and (
                             "case_sensitive" in item
@@ -761,7 +755,7 @@ class ConfigLinter:
                             self._add(
                                 LintSeverity.WARNING,
                                 f"'case_sensitive' only applies to string_exists/string_absent (ignored for '{asrt}').",
-                                project=p_name,
+                                project_name=p_name,
                             )
 
 
