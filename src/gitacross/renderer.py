@@ -9,7 +9,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def apply_operations(work_dir, project):
+def apply_operations(work_dir, project_config):
     """Run the full render pipeline on *work_dir* after source tag overlay.
 
     1. Remove paths in `ignore` (glob list, always first).
@@ -17,10 +17,10 @@ def apply_operations(work_dir, project):
     """
     work = Path(work_dir)
 
-    for pattern in project.renderer.ignore:
+    for pattern in project_config.renderer.ignore:
         _remove_glob(work, pattern)
 
-    for op in project.renderer.operations:
+    for op in project_config.renderer.operations:
         if "remove" in op:
             _op_remove(work, op["remove"])
         elif "rename" in op:
