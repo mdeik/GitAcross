@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import re
 from pathlib import Path
 from typing import final
 
@@ -31,20 +32,122 @@ def create_source(config, cache_dir, dry_run=False):
     )
 
 
-def _filter_from_sync_point(releases, sync_from):
-    """Filter to releases at or after the sync_from tag (inclusive).
+# Calendar versions start with a 4-digit year (YYYY[.MM[.DD[...]]], e.g.
+# 2024.05.01 or 2024-05-01). Every dot/dash/underscore-separated numeric
+# field is part of the date sequence.
+_CALENDAR_RE = re.compile(r"[^0-9]*(\d{4}(?:[._-]\d{1,4})*)")
+# SemVer-style cores are dot-separated numbers; a hyphen introduces a
+# prerelease, never another core field.
+_SEMVER_CORE_RE = re.compile(r"(\d+(?:\.\d+)*)")
 
-    Releases must already be sorted oldest-first. If sync_from is empty
-    return all releases. If the tag isn't found, return nothing —
-    better to skip than silently backfill history.
+
+def _version_key(tag):
+    """Parse a version-like tag into a comparable ``(fields, prerelease)`` key.
+
+    Two schemes are supported, parsed separately because they are semantically
+    different:
+
+    * **SemVer** — ``v1.2.3``, ``v1.2.3-rc.1``. Dot-separated core; a hyphen
+      starts a prerelease that sorts before the final release.
+    * **Calendar (CalVer)** — ``2024.05.01``, ``2024-05-01``, ``2024.05``.
+      Date-based: a leading 4-digit year marks it, and every numeric field
+      (dot *or* dash separated) belongs to the (year, month, day, ...)
+      sequence, compared as plain numbers. No major/minor/patch or SemVer
+      prerelease semantics apply to the date fields themselves.
+
+    Returns ``None`` when the tag carries no parseable version.
+    """
+    if not isinstance(tag, str):
+        return None
+    calendar = _CALENDAR_RE.match(tag)
+    if calendar:
+        fields = tuple(int(part) for part in re.split(r"[._-]", calendar.group(1)))
+        rest = tag[calendar.end():].split("+", 1)[0]
+    else:
+        match = _SEMVER_CORE_RE.search(tag)
+        if not match:
+            return None
+        fields = tuple(int(part) for part in match.group(1).split("."))
+        rest = tag[match.end():].split("+", 1)[0]
+    # Anything remaining after the version fields is a prerelease; build
+    # metadata ("+...") is ignored for ordering, per SemVer.
+    ids = tuple(re.findall(r"[0-9A-Za-z]+", rest))
+    return fields, (ids or None)
+
+
+def _cmp_version_key(a, b):
+    """Compare two ``_version_key`` results: -1/0/1 (SemVer-ish ordering)."""
+    (ca, pa), (cb, pb) = a, b
+    width = max(len(ca), len(cb))
+    ca += (0,) * (width - len(ca))
+    cb += (0,) * (width - len(cb))
+    if ca != cb:
+        return 1 if ca > cb else -1
+    # Same core: a final release outranks any prerelease of it
+    if pa is None and pb is None:
+        return 0
+    if pa is None:
+        return 1
+    if pb is None:
+        return -1
+    # Compare prerelease identifiers: numeric < alphanumeric, identifiers
+    # compare numerically when both numeric, lexically when both alphanumeric
+    for x, y in zip(pa, pb):
+        xn, yn = x.isdigit(), y.isdigit()
+        if xn and yn:
+            xi, yi = int(x), int(y)
+            if xi != yi:
+                return 1 if xi > yi else -1
+        elif xn != yn:
+            return -1 if xn else 1
+        elif x != y:
+            return 1 if x > y else -1
+    return 1 if len(pa) > len(pb) else (-1 if len(pa) < len(pb) else 0)
+
+
+def _newer_than_version(tag, cutoff):
+    """True when *tag* parses as a version strictly newer than *cutoff*."""
+    key = _version_key(tag)
+    return key is not None and _cmp_version_key(key, cutoff) > 0
+
+
+def _filter_from_sync_point(releases, sync_from):
+    """Filter to releases at or after the sync_from tag.
+
+    Releases must already be sorted oldest-first. If sync_from is empty return
+    all releases. When the exact tag is present, everything from it onwards is
+    included; when it is missing (renamed, deleted, or never released), releases
+    whose version is strictly newer than sync_from are synced instead. Tags that
+    cannot be compared (no version digits) are skipped rather than silently
+    backfilling history.
     """
     if not sync_from:
         return releases
     for i, rel in enumerate(releases):
         if rel["tag_name"] == sync_from:
             return releases[i:]
-    logger.warning("sync_from tag '%s' not found — syncing nothing", sync_from)
-    return []
+
+    # Exact tag not found — fall back to releases with a newer version.
+    cutoff = _version_key(sync_from)
+    if cutoff is None:
+        logger.warning(
+            "sync_from '%s' not found and is not version-like — syncing nothing",
+            sync_from,
+        )
+        return []
+    newer = [r for r in releases if _newer_than_version(r.get("tag_name"), cutoff)]
+    if not newer:
+        logger.warning(
+            "sync_from tag '%s' not found and no releases are newer — syncing nothing",
+            sync_from,
+        )
+    else:
+        logger.info(
+            "sync_from tag '%s' not found — syncing %d release(s) newer than it",
+            sync_from,
+            len(newer),
+        )
+    return newer
 
 
 # ---------------------------------------------------------------------------
