@@ -1,11 +1,13 @@
 """Tests for target endpoints and retry — split from the original single-file suite."""
 from __future__ import annotations
 
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 from tests.conftest import (
+    _git_commit,
     _make_file,
     _make_git_repo,
 )
@@ -50,6 +52,98 @@ def test_target_local():
         tgt.push("main")
         _ = tgt.create_release("v1.0", "v1.0", "body")
         print("  ✓ target: local")
+
+
+def test_target_local_empty_path_raises():
+    """A local target without a path must not default to the current directory."""
+    from gitacross.config import _EndpointConfig
+    from gitacross.target import create_target
+
+    cfg = _EndpointConfig({"type": "local", "path": ""}, is_source=False)
+    try:
+        _ = create_target(cfg, "cache")
+        assert False, "should have raised"
+    except ValueError as e:
+        assert "path" in str(e).lower()
+    print("  ✓ target: local target with empty path is rejected")
+
+
+def test_target_local_auto_init_missing_dir():
+    """A local target whose path does not exist yet is created (mkdir + init)."""
+    from gitacross.config import _EndpointConfig
+    from gitacross.target import create_target
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target_path = Path(tmp) / "nested" / "backup-repo"  # does not exist
+
+        cfg = _EndpointConfig(
+            {"type": "local", "path": str(target_path), "branch": "main"},
+            is_source=False,
+        )
+
+        tgt = create_target(cfg, tmp)
+        tgt.setup("main")
+
+        work = Path(tmp) / "work"
+        work.mkdir()
+        _ = _make_file(work, "artifact.txt", "hello")
+        _ = tgt.commit(work, "Release v1.0")
+
+        # Repo + files exist at the configured path, not elsewhere
+        assert (target_path / ".git").is_dir()
+        assert (target_path / "artifact.txt").read_text() == "hello"
+        assert tgt.head_sha()
+        print("  ✓ target: local auto-initialises a missing target path")
+
+
+def test_target_local_auto_init_inside_ancestor_repo():
+    """A target path inside another repo must get its own repo, not clobber the ancestor.
+
+    Regression: git resolves a non-repo path inside a repository to the
+    enclosing repo, which used to make local targets commit to and hard-reset
+    the repository the tool is run from instead of the configured path.
+    """
+    from gitacross.config import _EndpointConfig
+    from gitacross.target import create_target
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ancestor = Path(tmp) / "ancestor"
+        _ = _make_git_repo(ancestor)
+        _ = _make_file(ancestor, "keep.txt", "must survive")
+        _git_commit(ancestor, "c1")
+        ancestor_head_before = subprocess.run(
+            ["git", "-C", str(ancestor), "rev-parse", "HEAD"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+
+        target_path = ancestor / "test-repo"  # not a repo itself
+
+        cfg = _EndpointConfig(
+            {"type": "local", "path": str(target_path), "branch": "main"},
+            is_source=False,
+        )
+
+        tgt = create_target(cfg, tmp)
+        tgt.setup("main")
+
+        work = Path(tmp) / "work"
+        work.mkdir()
+        _ = _make_file(work, "artifact.txt", "hello")
+        _ = tgt.commit(work, "Release v1.0")
+
+        # The configured path is its own repo with the committed files
+        assert (target_path / ".git").is_dir()
+        assert (target_path / "artifact.txt").read_text() == "hello"
+
+        # The ancestor repo is untouched
+        assert (ancestor / "keep.txt").read_text() == "must survive"
+        ancestor_head_after = subprocess.run(
+            ["git", "-C", str(ancestor), "rev-parse", "HEAD"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        assert ancestor_head_after == ancestor_head_before
+        assert not (ancestor / "artifact.txt").exists()
+        print("  ✓ target: local auto-init inside an ancestor repo is isolated")
 
 
 def test_target_remote_push_commit_mode():
@@ -153,6 +247,60 @@ def test_create_target_unknown_type():
     except ValueError as e:
         assert "Unknown target type" in str(e)
     print("  ✓ target: unknown type rejected")
+
+def test_remote_target_cache_separates_hosts():
+    """Same-named target repos on different hosts get separate mirror caches."""
+    from gitacross.config import _EndpointConfig
+    from gitacross.target import create_target
+
+    calls = []
+
+    def fake_ensure_mirror(url, dest):
+        calls.append((url, dest))
+        return mock.MagicMock()
+
+    host_a = _EndpointConfig(
+        {"type": "gitea", "repo": "uqkami/Awara",
+         "api": "https://git.nodebay.top/api/v1", "token": "t"},
+        is_source=False,
+    )
+    host_b = _EndpointConfig(
+        {"type": "gitea", "repo": "uqkami/Awara",
+         "api": "https://gitea.example.com/api/v1", "token": "t"},
+        is_source=False,
+    )
+    same_as_a = _EndpointConfig(
+        {"type": "gitea", "repo": "uqkami/Awara",
+         "api": "https://git.nodebay.top/api/v1", "token": "other"},
+        is_source=False,
+    )
+
+    mock_apis = []
+    for _cfg in (host_a, host_b, same_as_a):
+        api = mock.MagicMock()
+        api.ensure_repo_exists.return_value = {
+            "clone_url": f"https://{_cfg.host}/{_cfg.repo}.git"
+        }
+        mock_apis.append(api)
+
+    with mock.patch(
+        "gitacross.target.get_api_client", side_effect=mock_apis
+    ), mock.patch(
+        "gitacross.git.GitRepo.ensure_mirror", side_effect=fake_ensure_mirror
+    ):
+        _ = create_target(host_a, "cache")
+        _ = create_target(host_b, "cache")
+        _ = create_target(same_as_a, "cache")
+
+    dest_a, dest_b, dest_same = (Path(d) for _, d in calls)
+    assert "target_gitea_git.nodebay.top_uqkami_Awara_" in str(dest_a)
+    assert "target_gitea_gitea.example.com_uqkami_Awara_" in str(dest_b)
+    for d in (dest_a, dest_b):
+        assert str(d).endswith(".git")
+    assert dest_a != dest_b
+    assert dest_a == dest_same  # same host + repo shares one mirror (dedup)
+    print("  ✓ target: remote target cache dirs are separated per host")
+
 
 def test_remote_target_no_clone_url_raises():
     """A remote target without any clone URL raises a clear error."""

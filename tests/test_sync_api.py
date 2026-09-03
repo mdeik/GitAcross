@@ -340,6 +340,129 @@ def test_run_returns_synced_false_on_failure():
     print("  ✓ run: returns synced=False on failure and continues remaining projects")
 
 
+def test_run_git_missing_reports_clear_error(monkeypatch):
+    """When git is not installed, run() reports a clear, actionable error."""
+    import gitacross
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "src_repo"
+        _ = _make_git_repo(src)  # created while git is still on PATH
+        cfg = Path(tmp) / "config.yml"
+        _write_local_config(
+            cfg, [{"name": "proj-gitless", "src": str(src), "tgt": str(Path(tmp) / "tgt")}]
+        )
+
+        monkeypatch.setenv("PATH", "/nonexistent")  # hide git from the run
+        results = gitacross.run(str(cfg), work_dir=Path(tmp) / "state")
+
+        assert results[0]["project"] == "proj-gitless"
+        assert results[0]["synced"] is False
+        assert results[0]["releases_synced"] == 0
+        assert results[0]["releases"] == []
+        assert "git executable not found" in results[0]["error"]
+    print("  ✓ run: missing git binary surfaces a clear error message")
+
+
+def test_run_clean_cache_removes_orphaned_mirrors():
+    """clean_cache deletes mirrors no config endpoint references — nothing else."""
+    import gitacross
+
+    from gitacross.config import Config
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        cfg_path = tmp / "config.yml"
+        _ = cfg_path.write_text("""
+projects:
+  - name: proj-a
+    source:
+      type: gitea
+      repo: owner/repo
+      api: https://git.nodebay.top/api/v1
+      token: t
+    target:
+      type: local
+      path: /tmp/tgt-a
+  - name: proj-disabled
+    enabled: false
+    source:
+      type: gitea
+      repo: owner/old
+      api: https://gitea.example.com/api/v1
+      token: t
+    target:
+      type: local
+      path: /tmp/tgt-b
+""")
+        cfg = Config(str(cfg_path))
+        referenced = cfg.projects[0].source.mirror_dir_name("source")
+        disabled_ref = cfg.projects[1].source.mirror_dir_name("source")
+        wd = tmp / "workdir"
+
+        with mock.patch("gitacross.main.sync_project", return_value=[]):
+            # (a) no cache dir yet -> clean-cache is a safe no-op
+            _ = gitacross.run(cfg, work_dir=wd, clean_cache=True)
+
+            # Build a cache with referenced + orphaned mirrors and junk
+            cache = wd / "cache"
+            (cache / referenced).mkdir(parents=True)
+            (cache / disabled_ref).mkdir()
+            orphan1 = cache / "source_gitea_git.nodebay.top_owner_old_aaaa.git"
+            orphan2 = cache / "target_github_github.com_owner_repo_bbbb.git"
+            orphan1.mkdir()
+            orphan2.mkdir()
+            (cache / "notes.txt").write_text("junk")
+            (cache / "not-a-mirror").mkdir()
+
+            # (b) orphans removed; referenced / disabled-project / junk survive
+            _ = gitacross.run(cfg, work_dir=wd, clean_cache=True)
+
+        assert not orphan1.exists()
+        assert not orphan2.exists()
+        assert (cache / referenced).is_dir()
+        assert (cache / disabled_ref).is_dir()
+        assert (cache / "notes.txt").read_text() == "junk"
+        assert (cache / "not-a-mirror").is_dir()
+
+        # (c) dry-run never deletes anything
+        (cache / "fresh_orphan_cccc.git").mkdir()
+        with mock.patch("gitacross.main.sync_project", return_value=[]):
+            _ = gitacross.run(cfg, work_dir=wd, clean_cache=True, dry_run=True)
+        assert (cache / "fresh_orphan_cccc.git").is_dir()
+
+        # (d) a second clean run removes it; (e) a third has nothing left to do
+        with mock.patch("gitacross.main.sync_project", return_value=[]):
+            _ = gitacross.run(cfg, work_dir=wd, clean_cache=True)
+        assert not (cache / "fresh_orphan_cccc.git").exists()
+        with mock.patch("gitacross.main.sync_project", return_value=[]):
+            _ = gitacross.run(cfg, work_dir=wd, clean_cache=True)
+    print("  ✓ run: clean_cache removes only unreferenced mirrors")
+
+
+def test_main_clean_cache_flag_passed_to_run():
+    """CLI --clean-cache is forwarded to run()."""
+    from gitacross.cli import main
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = Path(tmp) / "config.yml"
+        _write_local_config(cfg, [{"name": "proj-cli"}])
+        captured = {}
+
+        def _fake_run(*args, **kwargs):
+            captured.update(kwargs)
+            return []
+
+        with mock.patch("gitacross.main.run", side_effect=_fake_run), mock.patch(
+            "sys.argv", ["gitacross", "--config", str(cfg), "--clean-cache"]
+        ):
+            try:
+                main()
+            except SystemExit as e:
+                assert e.code in (0, None), f"expected exit 0, got {e.code}"
+        assert captured.get("clean_cache") is True
+    print("  ✓ cli: --clean-cache flag is forwarded to run()")
+
+
 def test_run_dry_run_passed_through():
     import gitacross
 

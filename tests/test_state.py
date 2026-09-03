@@ -74,4 +74,37 @@ def test_state():
         print("  ✓ state persistence")
 
 
+def test_state_tolerates_degenerate_yaml():
+    """A corrupt or hand-edited state file must never crash a run.
+
+    Regression: a state.yml containing only ``projects:`` parses to
+    ``{"projects": None}``, which crashed has_release with an AttributeError.
+    """
+    from gitacross.state import State
+
+    degenerate = [
+        "projects:\n",  # bare key, no value (the reported crash)
+        "projects: []\n",  # list instead of map
+        "[]\n",  # scalar document
+        "projects:\n  myapp:\n",  # null project entry
+        "projects:\n  myapp:\n    releases:\n",  # null releases entry
+        "",  # empty file
+    ]
+    for i, content in enumerate(degenerate):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.yml"
+            _ = path.write_text(content)
+            state = State(tmp)
+            assert not state.has_release("myapp", "v1.0"), f"case {i}: {content!r}"
+            state.add_release(
+                "myapp",
+                "v1.0",
+                {"tag": "v1.0", "target_commit": "x"},
+            )
+            state.save()
+            # Round-trip: the release is now visible and nothing else crashes
+            assert State(tmp).has_release("myapp", "v1.0"), f"case {i}: {content!r}"
+    print("  ✓ state: degenerate state.yml is treated as empty, never crashes")
+
+
 

@@ -26,11 +26,24 @@ class State:
         return f"State(work_dir={str(self.work_dir)!r})"
 
     def _load(self):
+        data = {}
         if self.path.exists():
             with open(self.path) as f:
-                data = yaml.safe_load(f) or {}
-        else:
+                data = yaml.safe_load(f)
+        # Tolerate degenerate or hand-edited YAML (e.g. a bare ``projects:``
+        # key with no value, non-map documents, or null entries) so a corrupt
+        # state file can never crash a run — it is simply treated as empty.
+        if not isinstance(data, dict):
             data = {}
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            projects = {}
+            data["projects"] = projects
+        for name, project in list(projects.items()):
+            if not isinstance(project, dict):
+                projects[name] = {}
+            elif not isinstance(project.get("releases"), dict):
+                project["releases"] = {}
         return data
 
     def has_release(self, project_name, tag_name):

@@ -484,19 +484,37 @@ def test_git_local_raises_on_non_repo():
         try:
             _ = GitRepo.local(not_a_repo)
             assert False, "should have raised"
-        except subprocess.CalledProcessError:
-            pass  # failing rev-parse surfaces as CalledProcessError
-
-        # When rev-parse resolves a git dir that does not exist → ValueError
-        with mock.patch(
-            "gitacross.git._git", return_value=mock.Mock(stdout="missing_git_dir")
-        ):
-            try:
-                _ = GitRepo.local(not_a_repo)
-                assert False, "should have raised"
-            except ValueError as e:
-                assert "Not a git repository" in str(e)
+        except ValueError as e:
+            assert "Not a git repository" in str(e)
     print("  ✓ git: GitRepo.local raises on a non-repo directory")
+
+
+def test_git_local_rejects_subdir_of_another_repo():
+    """GitRepo.local must not silently resolve to an enclosing repository.
+
+    Regression: git walks up to the nearest enclosing repository, so a path
+    that is not itself a repo but sits inside one used to resolve to the
+    enclosing repo — committing to and hard-resetting *its* working tree
+    (e.g. the directory the tool is run from) instead of the configured path.
+    """
+    from gitacross.git import GitRepo
+
+    with tempfile.TemporaryDirectory() as tmp:
+        outer = Path(tmp) / "outer"
+        _ = _make_git_repo(outer)
+        _ = _make_file(outer, "f.txt")
+        _git_commit(outer, "c1")
+
+        subdir = outer / "not_a_repo_itself"
+        subdir.mkdir()
+        try:
+            _ = GitRepo.local(subdir)
+            assert False, "should have raised"
+        except ValueError as e:
+            msg = str(e)
+            assert "Not a git repository" in msg
+            assert str(outer) in msg  # hint at the actual enclosing repo
+    print("  ✓ git: GitRepo.local rejects a subdirectory of another repo")
 
 
 def test_git_resolve_commit_unknown_returns_empty():
@@ -699,6 +717,95 @@ def test_remote_source_duck_typed_helpers():
     mock_git.export_tag.assert_called_with("v1", "dest")
     mock_api.list_release_assets.assert_called_with(7)
     print("  ✓ source: remote passthrough helpers delegate correctly")
+
+
+def test_remote_source_cache_separates_hosts():
+    """Same-named repos on different hosts must not share a mirror cache dir.
+
+    Regression: mirror names only encoded type + owner/repo, so two hosts with
+    the same repo slug collided — the shared mirror flipped origin and re-fetched
+    between projects, dirtying each other's cache.
+    """
+    from gitacross.config import _EndpointConfig
+    from gitacross.source import create_source
+
+    calls = []
+
+    def fake_ensure_mirror(url, dest):
+        calls.append((url, dest))
+        return mock.MagicMock()
+
+    host_a = _EndpointConfig(
+        {"type": "gitea", "repo": "uqkami/Awara",
+         "api": "https://git.nodebay.top/api/v1", "token": "t"},
+        is_source=True,
+    )
+    host_b = _EndpointConfig(
+        {"type": "gitea", "repo": "uqkami/Awara",
+         "api": "https://gitea.example.com/api/v1", "token": "t"},
+        is_source=True,
+    )
+    same_as_a = _EndpointConfig(
+        {"type": "gitea", "repo": "uqkami/Awara",
+         "api": "https://git.nodebay.top/api/v1", "token": "other-token"},
+        is_source=True,
+    )
+
+    mock_apis = [mock.MagicMock() for _ in range(3)]
+    with mock.patch(
+        "gitacross.source.get_api_client", side_effect=mock_apis
+    ), mock.patch(
+        "gitacross.git.GitRepo.ensure_mirror", side_effect=fake_ensure_mirror
+    ):
+        _ = create_source(host_a, "cache")
+        _ = create_source(host_b, "cache")
+        _ = create_source(same_as_a, "cache")
+
+    dest_a, dest_b, dest_same = (Path(d) for _, d in calls)
+    for d in (dest_a, dest_b):
+        assert str(d).endswith(".git")
+    assert "source_gitea_git.nodebay.top_uqkami_Awara_" in str(dest_a)
+    assert "source_gitea_gitea.example.com_uqkami_Awara_" in str(dest_b)
+    # Different hosts -> separate mirrors; same host (any token) -> shared mirror
+    assert dest_a != dest_b
+    assert dest_a == dest_same
+    print("  ✓ source: remote source cache dirs are separated per host")
+
+
+def test_remote_source_cache_hash_kills_slug_collisions():
+    """Slug-ambiguous repos (a/b_c vs a_b/c) on one host never share a mirror."""
+    from gitacross.config import _EndpointConfig
+    from gitacross.source import create_source
+
+    calls = []
+
+    def fake_ensure_mirror(url, dest):
+        calls.append((url, dest))
+        return mock.MagicMock()
+
+    def cfg(repo):
+        return _EndpointConfig(
+            {"type": "gitea", "repo": repo,
+             "api": "https://git.nodebay.top/api/v1", "token": "t"},
+            is_source=True,
+        )
+
+    mock_apis = [mock.MagicMock() for _ in range(2)]
+    with mock.patch(
+        "gitacross.source.get_api_client", side_effect=mock_apis
+    ), mock.patch(
+        "gitacross.git.GitRepo.ensure_mirror", side_effect=fake_ensure_mirror
+    ):
+        _ = create_source(cfg("a/b_c"), "cache")
+        _ = create_source(cfg("a_b/c"), "cache")
+
+    dest1, dest2 = (Path(d) for _, d in calls)
+    # Both have the same readable slug prefix (a_b_c), but the identity hashes
+    # differ, so they resolve to distinct mirror dirs
+    assert dest1 != dest2
+    assert "a_b_c_" in str(dest1)
+    assert "a_b_c_" in str(dest2)
+    print("  ✓ source: slug collisions resolve to distinct cache dirs")
 
 def test_local_source_duck_typed_helpers():
     from gitacross.config import _EndpointConfig

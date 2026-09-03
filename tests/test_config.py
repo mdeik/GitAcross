@@ -73,6 +73,85 @@ projects:
         os.unlink(config_path)
 
 
+def test_endpoint_host_and_host_slug():
+    """host/host_slug identify the git host and stay filesystem-safe."""
+    from gitacross.config import _EndpointConfig
+
+    gitea = _EndpointConfig(
+        {"type": "gitea", "repo": "a/b", "api": "https://git.nodebay.top/api/v1"},
+        is_source=True,
+    )
+    assert gitea.host == "git.nodebay.top"
+    assert gitea.host_slug == "git.nodebay.top"
+
+    # GitHub's API host maps to its git host
+    gh = _EndpointConfig(
+        {"type": "github", "repo": "a/b", "api": "https://api.github.com"},
+        is_source=True,
+    )
+    assert gh.host == "github.com"
+    assert gh.host_slug == "github.com"
+
+    # Ports are kept in the slug so hosts differing only by port stay distinct
+    port = _EndpointConfig(
+        {"type": "gitea", "repo": "a/b", "api": "https://git.nodebay.top:8443/api/v1"},
+        is_source=True,
+    )
+    assert port.host_slug == "git.nodebay.top_8443"
+
+    # Dots vs hyphens are NOT collapsed into the same slug
+    assert (
+        _EndpointConfig({"api": "https://my.host.com"}, is_source=True).host_slug
+        == "my.host.com"
+    )
+    assert (
+        _EndpointConfig({"api": "https://my-host.com"}, is_source=True).host_slug
+        == "my-host.com"
+    )
+
+    # No api configured -> empty host
+    assert _EndpointConfig({"api": ""}, is_source=True).host == ""
+    print("  ✓ config: endpoint host / host_slug")
+
+
+def test_mirror_dir_name_deterministic_and_unique():
+    """mirror_dir_name is deterministic across runs and collision-resistant."""
+    import re
+
+    from gitacross.config import _EndpointConfig
+
+    def name(repo, api="https://git.nodebay.top/api/v1", kind="gitea", role="source"):
+        raw = {"type": kind, "repo": repo, "api": api}
+        return _EndpointConfig(raw, is_source=True).mirror_dir_name(role)
+
+    # Deterministic: same identity always yields the same cache name
+    assert name("uqkami/Awara") == name("uqkami/Awara")
+
+    # Role is part of the identity (source vs target never share a mirror)
+    assert name("uqkami/Awara", role="target") != name("uqkami/Awara", role="source")
+
+    # Readable prefix + a short hex digest before the .git suffix
+    n = name("uqkami/Awara")
+    assert n.startswith("source_gitea_git.nodebay.top_uqkami_Awara_")
+    digest = n.rsplit("_", 1)[1]
+    assert re.fullmatch(r"[0-9a-f]{10}\.git", digest)
+
+    # Slug-ambiguous owner/repo pairs must never share a mirror
+    assert name("a/b_c") != name("a_b/c")
+
+    # Host case differences resolve to the same host -> same cache (dedup)
+    upper = _EndpointConfig(
+        {"type": "gitea", "repo": "a/b", "api": "https://GIT.NODEBAY.TOP/api/v1"},
+        is_source=True,
+    ).mirror_dir_name("source")
+    assert upper == name("a/b")
+
+    # Different hosts or ports stay distinct
+    assert name("a/b", api="https://git.nodebay.top:8443/api/v1") != name("a/b")
+    assert name("a/b", api="https://gitea.example.com/api/v1") != name("a/b")
+    print("  ✓ config: mirror_dir_name is deterministic and collision-resistant")
+
+
 def test_config_local():
     from gitacross.config import Config
 
