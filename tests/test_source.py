@@ -103,7 +103,170 @@ def test_source_local_sync_from():
         releases2 = src2.fetch_releases()
         assert releases2 == []
 
+        # sync_from = missing tag but with newer releases present — the newer
+        # releases are synced instead of syncing nothing
+        cfg3 = _EndpointConfig(
+            {
+                "type": "local",
+                "path": str(repo),
+                "tag_pattern": "v*",
+                "sync_from": "v1.5",
+            },
+            is_source=True,
+        )
+        src3 = create_source(cfg3, tmp)
+        tags3 = [r["tag_name"] for r in src3.fetch_releases()]
+        assert tags3 == ["v2.0", "v3.0"]
+
         print("  ✓ source: local sync_from")
+
+
+def test_filter_from_sync_point_fallback_newer_versions():
+    """A missing sync_from tag falls back to releases with a newer version."""
+    from gitacross.source import _filter_from_sync_point
+
+    def rel(tag):
+        return {"tag_name": tag}
+
+    all_rel = [rel("v0.8.0"), rel("v0.9.0"), rel("v1.0.0"), rel("v1.2.0"), rel("v2.0.0")]
+
+    # Exact match: everything from the tag onwards (unchanged behaviour)
+    assert [r["tag_name"] for r in _filter_from_sync_point(all_rel, "v0.9.0")] == [
+        "v0.9.0", "v1.0.0", "v1.2.0", "v2.0.0",
+    ]
+
+    # Missing tag: only strictly-newer versions are kept (v0.8.0 < v0.9.0)
+    assert [r["tag_name"] for r in _filter_from_sync_point(all_rel, "v0.9.1")] == [
+        "v1.0.0", "v1.2.0", "v2.0.0",
+    ]
+
+    # Numeric (not lexicographic) comparison: v0.10.0 > v0.9.9
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point([rel("v0.10.0"), rel("v0.9.0")], "v0.9.9")
+    ] == ["v0.10.0"]
+
+    # Zero-padding: v1.2 == v1.2.0, so it is NOT counted as newer
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point([rel("v1.2"), rel("v1.3")], "v1.2.0")
+    ] == ["v1.3"]
+
+    # No newer release and nothing comparable -> nothing synced
+    assert _filter_from_sync_point([rel("v0.5.0")], "v0.9.0") == []
+    assert _filter_from_sync_point([rel("v0.9.0"), rel("latest")], "v0.9.1") == []
+
+    # A non-version sync_from cannot be compared -> nothing synced
+    assert _filter_from_sync_point(all_rel, "alpha") == []
+
+    # Unversioned / non-string release tags are never counted as newer
+    assert _filter_from_sync_point(
+        [rel("latest"), {"tag_name": None}, rel("v1.0.0")], "v0.9.0"
+    ) == [rel("v1.0.0")]
+
+    # SemVer: a prerelease of a version is OLDER than its final release, so a
+    # missing v1.2.3 never pulls in v1.2.3-rc.1 — only truly newer versions do
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point([rel("v1.2.3-rc.1"), rel("v1.2.4")], "v1.2.3")
+    ] == ["v1.2.4"]
+
+    # Prerelease identifier ordering: numeric pre identifiers compare
+    # numerically, and a final release outranks any prerelease of its version
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("v1.2.3-rc.2"), rel("v1.2.3")], "v1.2.3-rc.1"
+        )
+    ] == ["v1.2.3-rc.2", "v1.2.3"]
+
+    # SemVer: numeric prerelease identifiers sort BEFORE alphanumeric ones, and
+    # a final release outranks every prerelease of its version
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("v1.0.0-1"), rel("v1.0.0-10"), rel("v1.0.0-beta"), rel("v1.0.0")],
+            "v1.0.0-2",
+        )
+    ] == ["v1.0.0-10", "v1.0.0-beta", "v1.0.0"]
+
+    # Build metadata is ignored for ordering
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point([rel("v1.2.3+meta"), rel("v1.2.4")], "v1.2.3")
+    ] == ["v1.2.4"]
+
+    # Alphanumeric prerelease identifiers compare lexically (beta > alpha), and
+    # longer identifier lists after an equal prefix sort later
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("v1.0.0-alpha.1"), rel("v1.0.0-beta"), rel("v1.0.0")],
+            "v1.0.0-alpha",
+        )
+    ] == ["v1.0.0-alpha.1", "v1.0.0-beta", "v1.0.0"]
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [
+                rel("v1.0.0-alpha"),
+                rel("v1.0.0-beta"),
+                rel("v1.0.0-alpha.2"),
+                rel("v1.0.0-alpha.1.beta"),
+            ],
+            "v1.0.0-alpha.1",
+        )
+    ] == ["v1.0.0-beta", "v1.0.0-alpha.2", "v1.0.0-alpha.1.beta"]
+
+    # ── Calendar versions (CalVer) are date-based, not SemVer ──
+    # Dot-shaped dates compare as plain (year, month, day) numbers
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("2024.01.15"), rel("2024.04.30"), rel("2024.05.01")], "2024.04.01"
+        )
+    ] == ["2024.04.30", "2024.05.01"]
+
+    # Dash-separated dates: '-' joins date fields; it is NOT a prerelease
+    # marker, so 2024-06-01 is newer than 2024-05-01
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("2024-04-15"), rel("2024-06-01")], "2024-05-01"
+        )
+    ] == ["2024-06-01"]
+
+    # Month-only anchor (2024.05 = May) vs day releases
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point([rel("2024.04"), rel("2024.05.10")], "2024.05")
+    ] == ["2024.05.10"]
+
+    # A prerelease of the same calendar date is not newer than the date itself
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("2024.05.01-rc.1"), rel("2024.05.02")], "2024.05.01"
+        )
+    ] == ["2024.05.02"]
+
+    # Scheme switch on one repo: a 2024.x calendar tag clears a v2-era SemVer
+    # anchor, while a v9.x tag never clears a 2024 calendar anchor
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point([rel("v2.9.0"), rel("2024.01.15")], "v2.9.9")
+    ] == ["2024.01.15"]
+    assert [
+        r["tag_name"]
+        for r in _filter_from_sync_point(
+            [rel("2024.02.01"), rel("v9.9.9")], "2024.01.15"
+        )
+    ] == ["2024.02.01"]
+
+    # No sync_from -> everything
+    assert len(_filter_from_sync_point(all_rel, "")) == 5
+
+    print("  ✓ source: missing sync_from falls back to newer versions")
 
 
 def test_source_remote_mode_tag_sync_from():

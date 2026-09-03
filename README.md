@@ -194,7 +194,7 @@ Stream each asset upload directly from the temporary download directory on disk 
 
 ### Source mode: release, tag, or commit
 
-Remote sources sync from the host's **API releases** by default. Two alternatives are available: git tags, or the latest commit of a branch. A `sync_from` key on the source sets the starting point — only releases from that tag onward are synced.
+Remote sources sync from the host's **API releases** by default. Two alternatives are available: git tags, or the latest commit of a branch. A `sync_from` key on the source sets the starting point — only releases from that tag onward are synced. If the exact tag no longer exists (renamed or deleted upstream), releases with a **higher version** are synced instead, so an absent anchor never blocks newer releases. Both SemVer tags (`v1.2.3`) and calendar tags (`2024.05.01`, `2024-05-01`) are compared version-wise; the two schemes are never confused with each other.
 
 Synced state is keyed by **tag name**, so switching a repo between `release` and `tag` modes is safe: already-synced tags are skipped regardless of the current mode (older state files keyed by API release id are migrated automatically).
 

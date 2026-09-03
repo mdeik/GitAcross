@@ -11,7 +11,7 @@ projects:
       token: ${GITEA_TOKEN}
       include_prereleases: false
       include_drafts: false
-      # sync_from: v2.0.0        # optional: only sync releases from this tag onwards
+      # sync_from: v2.0.0        # optional: only sync releases from this tag onwards (or any newer version, if the tag is gone)
       # mode: tag                # optional: treat git tags as releases (default: release)
 
     target:
