@@ -128,6 +128,13 @@ A config file starts with a `projects` list — each entry is one mirror and nee
 
 Tokens use `${VAR}` syntax — resolved from environment variables.
 
+For local **targets**, the `path` does not have to exist yet: if the directory is
+missing or is not already a git repository, GitAcross creates the directory and
+runs `git init` there before committing. If a repository already exists at that
+path it is opened as-is — existing git metadata is never re-initialised or
+overwritten (bare repositories and broken `.git` markers are refused with an
+error). Local **sources** must point at an existing git repository.
+
 | Option | Description |
 |---|---|
 | [`enabled`](#enabled) | Disable a project without deleting it |
@@ -407,7 +414,7 @@ GitAcross can be driven from the command line or called directly from Python.
 ### CLI
 
 ```
-gitacross --config PATH [--project-name NAME] [--workdir PATH] [--dry-run] [--reset] [--lint] [--fix] [-v]
+gitacross --config PATH [--project-name NAME] [--workdir PATH] [--dry-run] [--reset] [--clean-cache] [--lint] [--fix] [-v]
 ```
 
 | Flag | Description |
@@ -417,6 +424,7 @@ gitacross --config PATH [--project-name NAME] [--workdir PATH] [--dry-run] [--re
 | `--workdir PATH` | Where state and cache live (default: `.gitsync`) |
 | `--dry-run` | Preview changes without committing or pushing |
 | `--reset` | Clear saved state and cache before running (fresh start) |
+| `--clean-cache` | Delete mirror caches no longer referenced by the config (e.g. after changing a repo's host or name in the config) |
 | `--lint` | Check the config for YAML errors, invalid settings, and redundant options |
 | `--fix` | Fix misplaced keys and remove redundant options in the config |
 | `-v, --verbose` | Debug logging |

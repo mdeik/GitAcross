@@ -64,7 +64,7 @@ class _RemoteSource:
         self._api.ensure_repo_exists(create=not dry_run)
         self._git = GitRepo.ensure_mirror(
             config.clone_url,
-            Path(cache_dir) / f"source_{config.type}_{config.repo_slug}.git",
+            Path(cache_dir) / config.mirror_dir_name("source"),
         )
         self._include_prereleases = config.include_prereleases
         self._include_drafts = config.include_drafts

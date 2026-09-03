@@ -50,6 +50,11 @@ def main():
         default=DEFAULT_WORK_DIR,
         help="Directory for state.yml and cache/ (default: .gitsync)",
     )
+    _ = parser.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="Delete mirror caches no longer referenced by the config",
+    )
     _ = parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -62,6 +67,7 @@ def main():
     dry_run_flag = cast(bool, args.dry_run)
     reset_flag = cast(bool, args.reset)
     workdir = cast(str, args.workdir)
+    clean_cache_flag = cast(bool, args.clean_cache)
 
     _setup_logging(verbose)
 
@@ -96,6 +102,7 @@ def main():
             dry_run=dry_run_flag,
             reset=reset_flag,
             work_dir=workdir,
+            clean_cache=clean_cache_flag,
         )
     except (FileNotFoundError, ValueError) as exc:
         sys.exit(str(exc))
