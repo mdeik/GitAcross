@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitacross"
-version = "2.3.0"
+version = "2.3.1"
 description = "Mirror releases and git commits across platforms (Gitea, GitHub, local) with transform pipelines."
 readme = "README.md"
 requires-python = ">=3.8"
