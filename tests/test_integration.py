@@ -146,6 +146,227 @@ def test_e2e_local_to_local():
             os.chdir(old_cwd)
 
 
+def test_e2e_local_target_auto_init_inside_ancestor_repo():
+    """Local target path is created as its own repo — never the enclosing repo.
+
+    Regression: a target path that is not itself a repo but sits inside another
+    repository used to resolve to the enclosing repo, so syncs committed to and
+    hard-reset the directory the tool runs from instead of the configured path.
+    """
+    from gitacross.config import Config
+    from gitacross.main import sync_project
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        # ── Source repo: one tag ──
+        src = tmp / "source"
+        _ = _make_git_repo(src)
+        _ = _make_file(src, "README.md", "# Project")
+        _git_commit(src, "first")
+        _git_tag(src, "v1.0")
+
+        # ── Ancestor repo that must NOT receive the sync ──
+        ancestor = tmp / "ancestor"
+        _ = _make_git_repo(ancestor)
+        _ = _make_file(ancestor, "keep.txt", "untouched")
+        _git_commit(ancestor, "c1")
+        ancestor_head_before = subprocess.run(
+            ["git", "-C", str(ancestor), "rev-parse", "HEAD"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+
+        # ── Target path inside the ancestor repo, not itself a repo ──
+        tgt = ancestor / "test-repo"
+
+        cfg = tmp / "config.yml"
+        _ = cfg.write_text(f"""
+- name: e2e-auto-init
+  source:
+    type: local
+    path: {src}
+    tag_pattern: "v*"
+  target:
+    type: local
+    path: {tgt}
+    branch: main
+""")
+
+        old_cwd = Path.cwd()
+        os.chdir(tmp)
+        try:
+            config = Config(str(cfg))
+            _ = sync_project(config.projects[0], ".", dry_run=False)
+
+            # Synced content lives in the auto-created repo at the configured path
+            assert (tgt / ".git").is_dir()
+            assert (tgt / "README.md").read_text() == "# Project"
+            tags = subprocess.run(
+                ["git", "-C", str(tgt), "tag", "-l"],
+                capture_output=True, check=True, text=True,
+            ).stdout.strip().split()
+            assert "v1.0" in tags
+
+            # The ancestor repo was not touched
+            assert (ancestor / "keep.txt").read_text() == "untouched"
+            assert not (ancestor / "README.md").exists()
+            ancestor_head_after = subprocess.run(
+                ["git", "-C", str(ancestor), "rev-parse", "HEAD"],
+                capture_output=True, check=True, text=True,
+            ).stdout.strip()
+            assert ancestor_head_after == ancestor_head_before
+
+            print("  ✓ e2e: local target auto-initialised inside an ancestor repo")
+        finally:
+            os.chdir(old_cwd)
+
+
+def test_e2e_local_target_existing_repo_on_target_branch_appends():
+    """An existing repo already on the target branch keeps its history: release
+    commits are appended on top and nothing is re-initialised or rewritten.
+    """
+    from gitacross.config import Config
+    from gitacross.main import sync_project
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        # ── Source: two releases ──
+        src = tmp / "source"
+        _ = _make_git_repo(src)
+        for tag, content in (("v1.0", "# v1"), ("v2.0", "# v2")):
+            _ = _make_file(src, "README.md", content)
+            _git_commit(src, f"c-{tag}")
+            _git_tag(src, tag)
+
+        # ── Target: existing repo on main with its own history ──
+        tgt = tmp / "target"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(tgt)], check=True)
+        subprocess.run(["git", "-C", str(tgt), "config", "user.email", "t@test"], check=True)
+        subprocess.run(["git", "-C", str(tgt), "config", "user.name", "Test"], check=True)
+        _ = _make_file(tgt, "notes.txt", "unrelated pre-existing work")
+        _git_commit(tgt, "pre-existing work on main")
+        pre = subprocess.run(
+            ["git", "-C", str(tgt), "rev-parse", "HEAD"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+
+        cfg = tmp / "config.yml"
+        _ = cfg.write_text(f"""
+- name: e2e-existing
+  source:
+    type: local
+    path: {src}
+    tag_pattern: "v*"
+  target:
+    type: local
+    path: {tgt}
+    branch: main
+""")
+        config = Config(str(cfg))
+        _ = sync_project(config.projects[0], work_dir=tmp / "state", dry_run=False)
+
+        # History was appended to, not replaced: pre-existing commit is an ancestor
+        rc = subprocess.run(
+            ["git", "-C", str(tgt), "merge-base", "--is-ancestor", pre, "main"],
+            capture_output=True, check=False,
+        )
+        assert rc.returncode == 0, "existing history should be an ancestor of main"
+        count = subprocess.run(
+            ["git", "-C", str(tgt), "rev-list", "--count", "main"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        assert count == "3"  # pre-existing + v1.0 + v2.0
+
+        # Branch tip carries the latest release content
+        assert (tgt / "README.md").read_text() == "# v2"
+        tags = subprocess.run(
+            ["git", "-C", str(tgt), "tag", "-l"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip().split()
+        assert "v1.0" in tags and "v2.0" in tags
+
+        # Re-running against the same repo is a no-op (state-driven)
+        _ = sync_project(config.projects[0], work_dir=tmp / "state", dry_run=False)
+        count2 = subprocess.run(
+            ["git", "-C", str(tgt), "rev-list", "--count", "main"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        assert count2 == count
+
+        print("  ✓ e2e: existing repo on target branch gets releases appended")
+
+
+def test_e2e_local_target_existing_repo_on_other_branch_untouched():
+    """An existing repo whose history lives on another branch (e.g. master) is
+    left untouched: sync builds on its own branch and never touches the other.
+    """
+    from gitacross.config import Config
+    from gitacross.main import sync_project
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        src = tmp / "source"
+        _ = _make_git_repo(src)
+        _ = _make_file(src, "README.md", "# v1")
+        _git_commit(src, "c1")
+        _git_tag(src, "v1.0")
+
+        tgt = tmp / "target"
+        subprocess.run(["git", "init", "-q", "-b", "master", str(tgt)], check=True)
+        subprocess.run(["git", "-C", str(tgt), "config", "user.email", "t@test"], check=True)
+        subprocess.run(["git", "-C", str(tgt), "config", "user.name", "Test"], check=True)
+        _ = _make_file(tgt, "notes.txt", "unrelated work on master")
+        _git_commit(tgt, "pre-existing work on master")
+        master_before = subprocess.run(
+            ["git", "-C", str(tgt), "rev-parse", "master"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+
+        cfg = tmp / "config.yml"
+        _ = cfg.write_text(f"""
+- name: e2e-other-branch
+  source:
+    type: local
+    path: {src}
+    tag_pattern: "v*"
+  target:
+    type: local
+    path: {tgt}
+    branch: main
+""")
+        config = Config(str(cfg))
+        _ = sync_project(config.projects[0], work_dir=tmp / "state", dry_run=False)
+
+        # master (and its content) is untouched
+        master_after = subprocess.run(
+            ["git", "-C", str(tgt), "rev-parse", "master"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        assert master_after == master_before
+        notes = subprocess.run(
+            ["git", "-C", str(tgt), "ls-tree", "-r", "--name-only", "master"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        assert notes == "notes.txt"
+
+        # Sync landed on its own new branch with release content
+        head = subprocess.run(
+            ["git", "-C", str(tgt), "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip()
+        assert head == "main"
+        assert (tgt / "README.md").read_text() == "# v1"
+        tags = subprocess.run(
+            ["git", "-C", str(tgt), "tag", "-l"],
+            capture_output=True, check=True, text=True,
+        ).stdout.strip().split()
+        assert "v1.0" in tags
+
+        print("  ✓ e2e: existing repo on another branch is left untouched")
+
+
 def test_clean_text():
     from gitacross.main import _clean_text
 

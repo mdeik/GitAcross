@@ -58,7 +58,7 @@ class _RemoteTarget:
             )
         self._git = GitRepo.ensure_mirror(
             clone_url,
-            Path(cache_dir) / f"target_{config.type}_{config.repo_slug}.git",
+            Path(cache_dir) / config.mirror_dir_name("target"),
         )
         self._retry_max = retry_max
         self._retry_backoff = retry_backoff
@@ -120,10 +120,15 @@ class _RemoteTarget:
 
 
 class _LocalTarget:
-    """Target backed by a local git repo — no push, no API release."""
+    """Target backed by a local git repo — no push, no API release.
+
+    The repository at ``config.path`` is created on demand (directory plus
+    ``git init``) if it does not exist yet, so a local target can point at a
+    brand-new backup/mirror location.
+    """
 
     def __init__(self, config, author=None):
-        self._git = GitRepo.local(config.path)
+        self._git = GitRepo.ensure_local(config.path)
         self._author = author
 
     def setup(self, branch):

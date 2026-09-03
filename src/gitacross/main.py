@@ -446,6 +446,7 @@ def run(
     dry_run: bool = False,
     reset: bool = False,
     work_dir: str | Path = DEFAULT_WORK_DIR,
+    clean_cache: bool = False,
 ):
     """Sync releases from a config — the primary Python API entry point.
 
@@ -469,6 +470,14 @@ def run(
             syncing so that all releases are treated as new.
         work_dir:    Directory path for ``state.yml`` and ``cache/``.
             Defaults to ``.gitsync``.
+        clean_cache: When ``True``, delete bare mirror clones under
+            ``work_dir/cache/`` that no endpoint in the config references
+            anymore (e.g. after the config changed hosts or repos). Mirrors are
+            disposable clones, so this only ever costs a re-clone. Skipped in
+            dry-run mode. Note: mirrors are identified per config, so if
+            multiple config files share one ``work_dir``, run them with the
+            same ``clean_cache`` setting to avoid deleting each other's
+            mirrors.
 
     Returns:
         A list of dicts — one per enabled project that was attempted — with
@@ -522,6 +531,9 @@ def run(
     if project_name and not projects:
         raise ValueError(f"Project '{project_name}' not found in config")
 
+    if clean_cache and not dry_run and not reset:
+        _clean_mirror_cache(work_dir, config)
+
     results = []
     for proj in projects:
         if not proj.enabled:
@@ -550,6 +562,42 @@ def run(
             })
 
     return results
+
+
+def _clean_mirror_cache(work_dir: str | Path, config: Config) -> None:
+    """Delete mirror clones under ``work_dir/cache/`` not referenced by *config*.
+
+    Cache keys are deterministic identity names (role, type, host, repo), so a
+    config edit that changes any of those orphans the previous mirror. Orphans
+    are harmless but waste disk, so this removes them. The reference set is
+    built from *every* project in the config — enabled or not — and remote
+    endpoints only, so running a project subset or re-enabling a disabled
+    project never deletes a mirror it still needs.
+    """
+    cache_dir = Path(work_dir) / "cache"
+    if not cache_dir.is_dir():
+        return
+    referenced = {
+        endpoint.mirror_dir_name(role)
+        for proj in config.projects
+        for endpoint, role in ((proj.source, "source"), (proj.target, "target"))
+        if endpoint.is_remote
+    }
+    removed = []
+    for child in sorted(cache_dir.iterdir()):
+        if (
+            child.is_dir()
+            and child.name.endswith(".git")
+            and child.name not in referenced
+        ):
+            shutil.rmtree(child, ignore_errors=True)
+            removed.append(child.name)
+    if removed:
+        logger.info(
+            "Removed %d stale mirror cache(s): %s",
+            len(removed),
+            ", ".join(removed),
+        )
 
 
 

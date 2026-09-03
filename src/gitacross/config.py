@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -171,6 +172,41 @@ class _EndpointConfig:
         return self.repo.replace("/", "_")
 
     @property
+    def host(self):
+        """Git host for a remote endpoint.
+
+        GitHub's API lives at api.github.com, but its git host is github.com.
+        Gitea's API typically lives on the same host as git, so no transform is
+        needed there. Returns "" when no ``api`` is configured.
+        """
+        if not self.api:
+            return ""
+        raw_host = self.api.split("://")[1].split("/")[0] if "://" in self.api else self.api
+        return "github.com" if raw_host == "api.github.com" else raw_host
+
+    @property
+    def host_slug(self):
+        """Filesystem-safe host identifier for cache paths.
+
+        Keeps dots and hyphens (so e.g. ``my.host.com`` and ``my-host.com`` stay
+        distinct); only the port separator and any slashes become underscores.
+        """
+        return self.host.lower().replace(":", "_").replace("/", "_")
+
+    def mirror_dir_name(self, role):
+        """Deterministic, collision-resistant cache directory name for a remote endpoint.
+
+        Mirrors persist between runs — that is what makes them a cache — so the
+        name must be a pure function of the endpoint identity, never random.
+        Separator-based slugs alone can still collide (e.g. ``a/b_c`` and
+        ``a_b/c`` on the same host), so a short hash of the full identity
+        (role, type, host, repo) is appended to the readable prefix.
+        """
+        identity = "\0".join([role, self.type, self.host.lower(), self.repo])
+        digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]
+        return f"{role}_{self.type}_{self.host_slug}_{self.repo_slug}_{digest}.git"
+
+    @property
     def owner(self):
         return self.repo.split("/")[0] if "/" in self.repo else ""
 
@@ -179,11 +215,7 @@ class _EndpointConfig:
         """HTTPS clone URL with token embedded for auth."""
         if not self.api or not self.repo:
             return ""
-        raw_host = self.api.split("://")[1].split("/")[0] if "://" in self.api else self.api
-        # GitHub's API lives at api.github.com, but its git host is github.com.
-        # Gitea's API typically lives on the same host as git, so no transform needed.
-        host = "github.com" if raw_host == "api.github.com" else raw_host
-        return f"https://{self.owner}:{self.token}@{host}/{self.repo}.git"
+        return f"https://{self.owner}:{self.token}@{self.host}/{self.repo}.git"
 
 
 @final
