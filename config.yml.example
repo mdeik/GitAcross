@@ -80,6 +80,8 @@ projects:
             - path: .github/FUNDING.yml
               content: |
                 github: myuser
+              # Instead of inline content you can copy an existing file:
+              #   src: ../templates/FUNDING.yml   (relative to where you run gitacross)
         - validate:
             - assert: file_exists
               path: README.md

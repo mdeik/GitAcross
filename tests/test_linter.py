@@ -859,6 +859,9 @@ def test_linter_operations_kitchen_sink():
       - replace: [search, replace]
       - replace: [{search: a, replace: b, pattern: banana}]
       - add: [{}]
+      - add: [{path: no-body}]
+      - add: [{path: n, content: 123}]
+      - add: [{path: n, src: 123}]
       - validate: [not-a-dict]
 """)
     assert not report.is_valid
@@ -871,9 +874,34 @@ def test_linter_operations_kitchen_sink():
     assert "Rename pattern mode 'glob' is not supported" in msgs
     assert "Replace operation item requires 'search' and 'replace'" in msgs
     assert "Invalid replace pattern mode 'banana'" in msgs
-    assert "Add operation item requires 'path' and 'content'" in msgs
+    assert "Add operation item requires 'path' and either 'content' or 'src'" in msgs
+    assert "Add option 'content' must be a string" in msgs
+    assert "Add option 'src' must be a string path" in msgs
     assert "Validate operation item requires 'path'" in msgs
     print("  ✓ linter: operation kitchen-sink validation")
+
+
+def test_linter_add_src_and_precedence():
+    """add accepts 'content' or 'src'; both together is redundant, not an error."""
+    from gitacross.linter import ConfigLinter
+
+    linter = ConfigLinter()
+    report = linter.lint_yaml_string("""
+- name: p
+  source: {type: local, path: /a}
+  target: {type: local, path: /b}
+  renderer:
+    operations:
+      - add: [{path: a.txt, content: hi}]
+      - add: [{path: b.txt, src: tmpl.txt}]
+      - add: [{path: c.txt, content: hi, src: tmpl.txt}]
+      - add: [{path: d.txt, content: ""}]
+""")
+    assert report.is_valid  # redundant 'src' + no type errors
+    red = " | ".join(r.message for r in report.redundant)
+    assert "'src' is ignored when 'content' is present" in red
+    assert len(report.errors) == 0
+    print("  ✓ linter: add accepts content or src (content wins when both given)")
 
 def test_fix_report_and_issue_formatting():
     """FixIssue strings and FixReport.format_text variants."""
@@ -1028,4 +1056,44 @@ def test_fixer_missing_endpoint_sections():
         + "  target: {type: local, path: /b}\n"
     ).is_valid
     print("  ✓ fixer: missing endpoint sections and junk operations handled")
+
+
+def test_fixer_add_drops_src_shadowed_by_content():
+    """'src' is dead weight next to 'content' — --fix removes it, keeps src alone."""
+    import yaml
+
+    from gitacross.linter import ConfigFixer
+
+    fixer = ConfigFixer()
+    r = fixer.fix_yaml_string(
+        "- name: p\n"
+        + "  source: {type: local, path: /a}\n"
+        + "  target: {type: local, path: /b}\n"
+        + "  renderer:\n"
+        + "    operations:\n"
+        + "      - add:\n"
+        + "          - path: a.txt\n"
+        + "            content: hi\n"
+        + "            src: tmpl.txt\n"
+        + "          - path: b.txt\n"
+        + "            src: tmpl.txt\n"
+    )
+    assert r.is_valid
+    assert any("'src' in add operation" in f.message for f in r.fixes)
+    adds = yaml.safe_load(r.content)[0]["renderer"]["operations"][0]["add"]
+    assert "src" not in adds[0]
+    assert adds[0]["content"] == "hi"
+    assert adds[1]["src"] == "tmpl.txt"  # src alone is untouched
+
+    # content: null does NOT shadow src → src kept
+    r = fixer.fix_yaml_string(
+        "- name: p\n"
+        + "  source: {type: local, path: /a}\n"
+        + "  target: {type: local, path: /b}\n"
+        + "  renderer:\n"
+        + "    operations:\n"
+        + "      - add: [{path: a.txt, content: null, src: tmpl.txt}]\n"
+    )
+    assert r.is_valid and not r.fixes
+    print("  ✓ fixer: add op drops 'src' shadowed by 'content'")
 

@@ -693,14 +693,41 @@ class ConfigLinter:
 
                 elif op_type == "add":
                     for item in items:
-                        if (
-                            not isinstance(item, dict)
-                            or not item.get("path")
-                            or "content" not in item
+                        if not isinstance(item, dict):
+                            self._add(
+                                LintSeverity.ERROR,
+                                "Add operation item requires 'path' and either 'content' or 'src'.",
+                                project_name=p_name,
+                            )
+                            continue
+                        if not item.get("path") or (
+                            item.get("content") is None and not item.get("src")
                         ):
                             self._add(
                                 LintSeverity.ERROR,
-                                "Add operation item requires 'path' and 'content'.",
+                                "Add operation item requires 'path' and either 'content' or 'src'.",
+                                project_name=p_name,
+                            )
+                        if item.get("content") is not None and not isinstance(
+                            item["content"], str
+                        ):
+                            self._add(
+                                LintSeverity.ERROR,
+                                "Add option 'content' must be a string.",
+                                project_name=p_name,
+                            )
+                        if item.get("src") is not None and not isinstance(
+                            item["src"], str
+                        ):
+                            self._add(
+                                LintSeverity.ERROR,
+                                "Add option 'src' must be a string path to an existing file.",
+                                project_name=p_name,
+                            )
+                        if item.get("content") is not None and item.get("src"):
+                            self._add(
+                                LintSeverity.REDUNDANT,
+                                "'src' is ignored when 'content' is present in add operation.",
                                 project_name=p_name,
                             )
 
