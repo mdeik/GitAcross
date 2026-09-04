@@ -431,6 +431,95 @@ def test_renderer_add():
     print("  ✓ renderer add")
 
 
+def test_renderer_add_from_src():
+    """add can copy an existing file via 'src'; inline 'content' wins over it."""
+    from gitacross.config import ProjectConfig
+    from gitacross.renderer import apply_operations
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Source template lives *outside* the exported work tree (as in real
+        # runs — the work tree is an ephemeral export, so 'src' resolves
+        # against the process working directory).
+        template = Path(tmp) / "FUNDING.tmpl"
+        _ = template.write_text("github: myuser\n", encoding="utf-8")
+        _ = _make_file(root, "README.md")
+
+        ops = [
+            {
+                "add": [
+                    {"path": ".github/FUNDING.yml", "src": str(template)},
+                    # content wins, even an empty string
+                    {"path": "inline.txt", "content": "inline", "src": str(template)},
+                    {"path": "empty.txt", "content": "", "src": str(template)},
+                ]
+            }
+        ]
+        project = ProjectConfig(_make_project_raw(ops))
+        apply_operations(root, project)
+
+        assert (root / ".github/FUNDING.yml").read_text() == "github: myuser\n"
+        assert (root / "inline.txt").read_text() == "inline"
+        assert (root / "empty.txt").read_text() == ""
+
+        # Missing source file -> loud error naming both paths
+        ops = [{"add": [{"path": "x.txt", "src": str(root / "nope.txt")}]}]
+        project = ProjectConfig(_make_project_raw(ops))
+        try:
+            apply_operations(root, project)
+            assert False, "should raise"
+        except RuntimeError as e:
+            assert "source file" in str(e) and "x.txt" in str(e)
+
+        # Directory as src -> explicit rejection, not a confusing copy
+        (root / "adir").mkdir()
+        ops = [{"add": [{"path": "y.txt", "src": str(root / "adir")}]}]
+        project = ProjectConfig(_make_project_raw(ops))
+        try:
+            apply_operations(root, project)
+            assert False, "should raise"
+        except RuntimeError as e:
+            assert "is not a file" in str(e) and "y.txt" in str(e)
+
+    print("  ✓ renderer add from src file")
+
+
+def test_renderer_add_src_binary():
+    """src copies non-UTF-8/binary files byte-for-byte; copy2 keeps the mode."""
+    from gitacross.config import ProjectConfig
+    from gitacross.renderer import apply_operations
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        # Every byte value 0..255 (invalid UTF-8) + NULs + no trailing newline
+        payload = bytes(range(256)) * 3 + b"\x00\xfftail"
+        asset = root / "logo.bin"
+        _ = asset.write_bytes(payload)
+        _ = _make_file(root, "README.md")
+        if os.name != "nt":  # exec bit is a POSIX concept
+            os.chmod(asset, 0o755)
+
+        ops = [{"add": [{"path": "assets/deep/logo.bin", "src": str(asset)}]}]
+        project = ProjectConfig(_make_project_raw(ops))
+        apply_operations(root, project)
+
+        copied = root / "assets/deep/logo.bin"
+        assert copied.exists()
+        assert copied.read_bytes() == payload  # exact byte identity
+        assert asset.read_bytes() == payload  # source untouched
+        assert (root / "README.md").exists()
+        if os.name != "nt":
+            assert os.stat(copied).st_mode & 0o777 == 0o755  # mode preserved
+
+        # empty add item (no content/src) still creates an empty file
+        ops = [{"add": [{"path": "bare.txt"}]}]
+        project = ProjectConfig(_make_project_raw(ops))
+        apply_operations(root, project)
+        assert (root / "bare.txt").read_bytes() == b""
+
+    print("  ✓ renderer add copies binary src byte-for-byte (mode preserved)")
+
+
 def test_renderer_validate_fail():
     from gitacross.config import ProjectConfig
     from gitacross.renderer import apply_operations

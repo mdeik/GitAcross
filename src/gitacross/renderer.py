@@ -196,9 +196,17 @@ def _match_case(matched, replacement):
 def _op_add(work, ops):
     """Create files in the work tree before commit.
 
-    Each op: {path: str, content: str}
-    Raises if the path already exists (avoids silently overwriting).
-    Creates parent directories automatically.
+    Each op: {path: str, content?: str, src?: str}
+    - content: inline file contents — takes precedence over ``src`` when both
+      are given (even an empty string). Written as UTF-8 text with ``\n`` line
+      endings on every OS.
+    - src: path of an existing regular file to copy in — binary-safe (no
+      decode/encode round-trip) via :func:`shutil.copy2`, so the bytes as well
+      as the mode/timestamps are preserved. Directories are rejected; relative
+      paths resolve against the current working directory.
+    If neither is given the file is created empty. Raises if the path already
+    exists (avoids silently overwriting). Creates parent directories
+    automatically.
     """
     for op in ops:
         path = op["path"]
@@ -206,8 +214,35 @@ def _op_add(work, ops):
         if target.exists():
             raise RuntimeError(f"Add conflict: '{path}' already exists")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(op.get("content", ""), encoding="utf-8")
+        content = op.get("content")
+        if content is not None:
+            _write_text_lf(target, content)
+        else:
+            src = op.get("src")
+            if not src:
+                _write_text_lf(target, "")
+            else:
+                source = Path(src)
+                if not source.is_file():
+                    if source.exists():
+                        raise RuntimeError(
+                            f"Add failed: 'src' '{src}' is not a file (path: '{path}') — only regular files can be added"
+                        )
+                    raise RuntimeError(
+                        f"Add failed: source file '{src}' not found for '{path}'"
+                    )
+                _ = shutil.copy2(source, target)
         logger.debug("Added file: %s", path)
+
+
+def _write_text_lf(path, text):
+    """Write *text* as UTF-8 with ``\n`` endings regardless of the host OS.
+
+    Text mode on Windows would otherwise translate ``\n`` to ``\r\n``
+    (``os.linesep``), making inline content depend on where gitacross runs.
+    """
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        _ = f.write(text)
 
 
 def _op_validate(work, ops):

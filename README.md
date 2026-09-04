@@ -361,17 +361,22 @@ In `regex` mode, backreferences (e.g. `\1`) are expanded before the casing adapt
 | Field | Required | Description |
 |---|---|---|
 | `path` | yes | File path to create (parent dirs auto-created) |
-| `content` | yes | File contents |
+| `content` | one of | Inline file contents. Takes precedence over `src` when both are given |
+| `src` | one of | Path of an existing **regular file** to copy in — binary-safe, mode & timestamps preserved (relative to where you run gitacross) |
+
+Provide inline `content` or point `src` at an existing file (`content` wins if both are set — use `content: ""` for an empty file). Inline `content` is written as UTF-8 text with `\n` line endings on every OS. `src` copies the file in with `shutil.copy2` — no decode/encode round-trip and no newline translation — so binary assets work and the result is byte-identical on any platform. `src` must point to a single file, not a directory.
 
 ```yaml
 - add:
     - path: .github/FUNDING.yml
       content: |
         github: myuser
-    - path: RELEASE_NOTES.md
-      content: |
-        # Release Notes
-        ...
+    - path: LICENSE
+      src: ../templates/LICENSE   # copy an existing file instead of inlining it
+    - path: assets/favicon.ico
+      src: ../../branding/favicon.ico   # binary files work too
+    - path: tools/deploy.sh
+      src: ./scripts/deploy.sh    # executable bit is preserved (copy2)
 ```
 
 #### `validate`

@@ -244,6 +244,16 @@ class ConfigFixer:
                                         "Removed redundant 'case_sensitive: true' in validate operation",
                                         project_name=p_name,
                                     )
+                                if (
+                                    op_type == "add"
+                                    and item.get("content") is not None
+                                    and item.get("src")
+                                ):
+                                    del item["src"]
+                                    self._add(
+                                        "Removed redundant 'src' in add operation ('content' takes precedence)",
+                                        project_name=p_name,
+                                    )
 
 
 
